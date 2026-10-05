@@ -8,6 +8,7 @@ from rsl_rl.runners import OnPolicyRunner
 from .config import StandingCfg, ppo_config
 from .env import StandingEnv
 from .normalization import restore
+from .action_mapping import equivalent_raw
 
 
 class ScriptedController:
@@ -25,6 +26,7 @@ class ScriptedController:
         self.inverse = torch.linalg.inv(response)
         self.basis = torch.tensor([patterns()[name].tolist() for name in names], device=env.device).T
         self.reference = env.reference_standing_orientation[:2]
+        self.mapping = env.cfg.action_mapping
 
     def __call__(self, obs):
         gravity = obs['actor'][:, :3]
@@ -32,7 +34,7 @@ class ScriptedController:
                            torch.asin(gravity[:,0].clamp(-1,1))), -1)
         omega = obs['actor'][:,3:5]
         coefficients = torch.rad2deg(2*(self.reference-rpy)-.2*omega) @ self.inverse.T
-        return coefficients.clamp(-1,1) @ self.basis.T
+        return equivalent_raw(coefficients.clamp(-1,1) @ self.basis.T,self.mapping)
 
 
 @torch.inference_mode()
@@ -174,12 +176,13 @@ def main():
     parser.add_argument('--random',action='store_true')
     parser.add_argument('--scripted',action='store_true')
     parser.add_argument('--orientation-reward-scale',type=float,default=.05)
+    parser.add_argument('--action-mapping',choices=['clip','tanh'],default='clip')
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     cfg=StandingCfg(num_envs=args.num_envs,stage=args.stage,v2_stage=args.v2_stage,
         smoothing_seconds=args.smoothing_tau,seed=args.seed,episode_seconds=args.seconds,
         push_force=args.push_force,balanced_push_directions=True,
-        orientation_reward_scale=args.orientation_reward_scale)
+        orientation_reward_scale=args.orientation_reward_scale,action_mapping=args.action_mapping)
     result=evaluate(cfg,args.checkpoint,args.random,args.scripted)
     args.output.write_text(json.dumps(result,indent=2,allow_nan=False))
     print(f'평가 결과 저장: {args.output}')

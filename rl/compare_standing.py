@@ -10,6 +10,7 @@ from .diagnose_ppo import stats, correlation
 from rsl_rl.models.mlp_model import MLPModel
 from tensordict import TensorDict
 from .config import ppo_config
+from .action_mapping import bounded_action
 
 
 class ActionTrace:
@@ -19,7 +20,7 @@ class ActionTrace:
     def __call__(self,env,obs,action,reward,done,extras,alive,time):
         d=extras['diagnostics']
         error=torch.stack((d['roll'],d['pitch']),-1)-env.reference_standing_orientation[:2]
-        row=dict(requested=action,applied=d['applied_actions'],target=d['targets'],
+        row=dict(requested=action,bounded=d['bounded_actions'],applied=d['applied_actions'],target=d['targets'],
             actual=extras['terminal_observation']['actor'][:,6:18]+env.default_joint_position,
             error=error.rad2deg(),omega=obs['actor'][:,3:5],raw=obs['actor'],
             reward=reward,valid=alive,after=alive&(time>=d['push_start']),
@@ -30,13 +31,17 @@ class ActionTrace:
         return {k:np.stack([row[k] for row in self.rows]) for k in self.rows[0]}
 
 
-def action_summary(data):
+def action_summary(data,action_mapping='clip'):
     mask=data['valid']
     requested=data['requested'][mask]
     applied=data['applied'][mask]
     clipped=requested.clip(-1,1)
+    bounded=data['bounded'][mask] if 'bounded' in data else (np.tanh(requested) if action_mapping=='tanh' else clipped)
+    gain=1-bounded**2 if action_mapping=='tanh' else (np.abs(requested)<1).astype(float)
     feedback={}
-    for key in ('requested','applied'):
+    for key in ('requested','bounded','applied'):
+        if key=='bounded' and key not in data:
+            continue
         knee=data[key][...,2::3]
         differential=np.stack(((knee[...,0]-knee[...,1]+knee[...,2]-knee[...,3])/4,
                                (knee[...,0]+knee[...,1]-knee[...,2]-knee[...,3])/4),-1)
@@ -45,9 +50,14 @@ def action_summary(data):
             feedback[f'{key}_{axis}']=dict(error_correlation=correlation(data['error'][...,j][after],differential[...,j][after]) if after.any() else None,
                 velocity_correlation=correlation(data['omega'][...,j][after],differential[...,j][after]) if after.any() else None,
                 differential=stats(differential[...,j][after]))
-    return dict(requested=stats(requested,axis=0),applied=stats(applied,axis=0),
+    return dict(requested=stats(requested,axis=0),bounded=stats(bounded,axis=0),applied=stats(applied,axis=0),
         outside_range_fraction=float((np.abs(requested)>1).mean()),
-        actual_clipping_fraction=float((requested!=clipped).mean()),
+        actual_clipping_fraction=float((requested!=clipped).mean()) if action_mapping=='clip' else 0.,
+        action_mapping=action_mapping,bounded_90_fraction=float((np.abs(bounded)>=.9).mean()),
+        bounded_99_fraction=float((np.abs(bounded)>=.99).mean()),
+        bounded_positive_99=(bounded>=.99).mean(0).tolist(),bounded_negative_99=(bounded<=-.99).mean(0).tolist(),
+        applied_positive_99=(applied>=.99).mean(0).tolist(),applied_negative_99=(applied<=-.99).mean(0).tolist(),
+        local_gain=stats(gain,axis=0),gain_below_half=float((gain<.5).mean()),gain_below_tenth=float((gain<.1).mean()),
         boundary_applied_fraction=float((np.abs(applied)>=.99).mean()),
         target_degrees=stats(np.rad2deg(data['target'][mask]),axis=0),
         actual_degrees=stats(np.rad2deg(data['actual'][mask]),axis=0),feedback=feedback)
@@ -68,7 +78,7 @@ def aggregate(rows):
 
 
 @torch.no_grad()
-def policy_probe(checkpoint,data):
+def policy_probe(checkpoint,data,action_mapping='clip'):
     """같은 관측에서 자세·각속도만 바꿔 국소 피드백 부호를 확인한다."""
     actor_cfg=ppo_config()['actor']
     raw=torch.tensor(data['raw'][data['valid']],device='cuda')
@@ -82,13 +92,23 @@ def policy_probe(checkpoint,data):
             'joint_velocity':(18,30),'previous_action':(30,42)}
     observations={name:dict(raw=stats(raw[:,a:b].cpu().numpy(),axis=0),
         normalized=stats(normalized[:,a:b].cpu().numpy(),axis=0)) for name,(a,b) in groups.items()}
+    warmup_path=Path(checkpoint).parent/'warmup_observations.pt'
+    if warmup_path.exists():
+        warmup=torch.load(warmup_path,weights_only=True,map_location='cpu')[:,30:42].numpy()
+        previous=raw[:,30:42].cpu().numpy()
+        low,high=warmup.min(0),warmup.max(0)
+        outside=(previous<low)|(previous>high)
+        mean,std=warmup.mean(0),warmup.std(0)
+        observations['previous_action'].update(warmup_min=low.tolist(),warmup_max=high.tolist(),
+            outside_warmup_range=float(outside.mean()),outside_warmup_range_per_joint=outside.mean(0).tolist(),
+            outside_warmup_three_std=float((np.abs(previous-mean)>3*std).mean()))
     selected=torch.tensor(data['raw'][data['after']][::16],device='cuda')
     if len(selected)==0:
         return dict(observations=observations,local_feedback=None)
     gravity=selected[:,:3]
     rpy=torch.stack((torch.atan2(-gravity[:,1],-gravity[:,2]),torch.asin(gravity[:,0].clamp(-1,1))),-1)
     def differential(obs):
-        knees=actor(TensorDict({'actor':obs},batch_size=[len(obs)])).clamp(-1,1)[:,2::3]
+        knees=bounded_action(actor(TensorDict({'actor':obs},batch_size=[len(obs)])),action_mapping)[:,2::3]
         return torch.stack(((knees[:,0]-knees[:,1]+knees[:,2]-knees[:,3])/4,
                             (knees[:,0]+knees[:,1]-knees[:,2]-knees[:,3])/4),-1)
     feedback={}

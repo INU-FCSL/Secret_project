@@ -33,16 +33,23 @@ def main():
     parser.add_argument('--gate-after-25', action='store_true')
     parser.add_argument('--v2-baseline', type=Path)
     parser.add_argument('--v3a-baseline', type=Path)
+    parser.add_argument('--action-mapping',choices=['clip','tanh'],default='clip')
+    parser.add_argument('--rollout',type=int,choices=[16,32],default=16)
+    parser.add_argument('--ablation-parent',type=Path)
+    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e'])
     args = parser.parse_args()
     if args.iterations < 1:
         parser.error('iteration은 양수여야 합니다.')
+    if args.ablation_parent and (args.iterations!=100 or args.normalization!='warmup-frozen' or
+                                args.ablation_name is None or args.gate_after_25):
+        parser.error('후보 판정에는 100회 상한·정규화 고정·후보 이름이 필요하며 이전 gate와 동시에 사용할 수 없습니다.')
     if args.gate_after_25 and (args.iterations != 100 or args.normalization != 'warmup-frozen'
                               or args.v2_baseline is None or args.v3a_baseline is None):
         parser.error('25회 판정은 100회 상한, 정규화 고정, V2/V3-A 기준 경로가 필요합니다.')
     env_cfg = StandingCfg(num_envs=args.num_envs, seed=args.seed, stage=2 if args.v2_stage else args.stage,
                           v2_stage=args.v2_stage, smoothing_seconds=args.smoothing_tau,
                           episode_seconds=args.episode_seconds,
-                          orientation_reward_scale=args.orientation_reward_scale)
+                          orientation_reward_scale=args.orientation_reward_scale,action_mapping=args.action_mapping)
     frozen = args.normalization == 'warmup-frozen'
     if frozen:
         random.seed(args.seed)
@@ -50,6 +57,7 @@ def main():
         torch.manual_seed(args.seed)
     env = StandingEnv(env_cfg)
     cfg = ppo_config()
+    cfg['num_steps_per_env']=args.rollout
     if frozen:
         cfg['seed'] = args.seed
     cfg['max_iterations'] = args.iterations
@@ -73,6 +81,11 @@ def main():
             output=args.log_dir / 'warmup_observations.pt')
         (args.log_dir / 'normalization.json').write_text(json.dumps(normalization, indent=2, allow_nan=False))
         preflight = validate_rollout(env, runner.alg, frozen_state)
+        preflight['storage']=dict(steps=runner.alg.storage.num_transitions_per_env,
+            actions_shape=list(runner.alg.storage.actions.shape),returns_finite=bool(torch.isfinite(runner.alg.storage.returns).all()),
+            advantages_finite=bool(torch.isfinite(runner.alg.storage.advantages).all()),
+            mini_batch_count=cfg['algorithm']['num_mini_batches'],epochs=cfg['algorithm']['num_learning_epochs'],
+            gamma=cfg['algorithm']['gamma'],lambda_value=cfg['algorithm']['lam'])
         (args.log_dir / 'preflight.json').write_text(json.dumps(preflight, indent=2, allow_nan=False))
         # 관측 준비·사전 검증 경로와 학습 시작 경로를 구분한다.
         torch.manual_seed(args.seed)
@@ -82,6 +95,7 @@ def main():
     initial_state = runner.alg.save()
     checkpoint_infos = {'completed_updates': 0}
     checkpoint_infos['orientation_reward_scale'] = env_cfg.orientation_reward_scale
+    checkpoint_infos['action_mapping'] = env_cfg.action_mapping
     if frozen:
         checkpoint_infos['normalization'] = normalization
     initial_state.update(iter=0, infos=checkpoint_infos)
@@ -94,6 +108,7 @@ def main():
             metadata = dict(infos or {})
             metadata['normalization'] = normalization
             metadata['orientation_reward_scale'] = env_cfg.orientation_reward_scale
+            metadata['action_mapping'] = env_cfg.action_mapping
             metadata.setdefault('completed_updates', len(metrics))
             native_save(path, infos=metadata)
         runner.save = save_frozen_checkpoint
@@ -169,7 +184,22 @@ def main():
         return result
     runner.alg.update = checked_update
     try:
-        if args.gate_after_25:
+        if args.ablation_parent:
+            runner.learn(25,init_at_random_ep_len=False)
+            evaluation=args.log_dir.parent/'evaluation'
+            command=[sys.executable,'-m','rl.ablation','--candidate',str(args.log_dir),
+                '--parent',str(args.ablation_parent),'--name',args.ablation_name,'--checkpoints','0','25',
+                '--output',str(evaluation)]
+            subprocess.run(command,check=True)
+            decision=json.loads((evaluation/'decision.json').read_text())
+            if decision['status'] in ('SUCCESS','PARTIAL'):
+                runner.current_learning_iteration=len(metrics)
+                runner.learn(75,init_at_random_ep_len=False)
+                command[command.index('--checkpoints')+1:command.index('--output')]=['50','75','100']
+                subprocess.run(command,check=True)
+                decision=json.loads((evaluation/'decision.json').read_text())
+            print(f"후보 판정: {args.ablation_name}, {decision['status']}, 완료={len(metrics)}회",flush=True)
+        elif args.gate_after_25:
             runner.learn(25, init_at_random_ep_len=False)
             gate_output=args.log_dir.parent/'gate_evaluation'
             command=[sys.executable,'-m','rl.compare_standing','--v2',str(args.v2_baseline),

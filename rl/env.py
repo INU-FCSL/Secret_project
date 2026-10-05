@@ -11,6 +11,7 @@ from mjlab.sim.sim import Simulation, SimulationCfg, MujocoCfg
 from .config import StandingCfg, MODEL_PATH, LEG_JOINT_NAMES, ACTION_SCALE
 from .rewards import standing_rewards
 from .reference import calibrate_reference, gravity_from_rpy
+from .action_mapping import bounded_action
 
 
 @wp.kernel
@@ -205,7 +206,7 @@ class StandingEnv(VecEnv):
         actions = actions.to(device=self.device, dtype=torch.float32).detach()
         if not torch.isfinite(actions).all():
             raise ValueError('action에 NaN 또는 무한값이 있습니다.')
-        requested = actions.clamp(-1, 1)
+        requested = bounded_action(actions,self.cfg.action_mapping)
         delta = requested - self.previous_actions
         self.requested_actions.copy_(requested)
         # 0.75초 시정수의 필터. 관측에 실제 적용 action을 포함해 필터 상태를 노출한다.
@@ -257,6 +258,7 @@ class StandingEnv(VecEnv):
         done = terminated | timeout
         terminal_obs = self.get_observations().clone()
         diagnostics = dict(height=self.qpos[:, 2].clone(), gravity=gravity.clone(),
+            raw_actions=actions.clone(), bounded_actions=requested.clone(),
             feet=feet.clone(), self_contacts=self_contacts.clone(), peak_torque=peak,
             saturation_steps=saturation, targets=self.joint_targets.clone(),
             applied_actions=self.previous_actions.clone(), reasons=reasons,

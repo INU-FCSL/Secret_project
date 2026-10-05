@@ -203,3 +203,13 @@ Stage A에서 64개 환경, 100 update, rollout 16, 학습 seed 314를 사용했
 학습 상한은 100회다. 먼저 25회만 실행하고 별도 프로세스에서 세 seed의 동일 48 episode를 평가한다. 이때 학습 환경·optimizer·난수 상태를 보존한다. zero보다 최대 오차가 1.5배, 누적 오차가 2배를 넘으면서 국소 자세 feedback 부호가 틀리거나 요청 clipping이 25%를 넘으면 조기 실패로 판정한다. 이 조건을 충족하지 않고 안전한 개선 징후가 있을 때만 남은 75회를 연장한다. 구체적인 조건과 결과는 `gate.json`에 기록한다.
 
 저장 trajectory 재점수화는 물리를 다시 실행하지 않고 보존된 자세와 나머지 보상항을 사용한다. 실제 평형 기준 민감도와 네 외란 방향의 1·5·10·25·50 step 순서도 학습 전에 검사한다. 출력 자료와 checkpoint는 `/tmp`에 보관하며 실험을 다시 실행할 때는 새로운 출력 경로를 선택한다. 상세 결과는 [Standing V3-B 보고서](STANDING_V3B.md)에 기록한다.
+
+## Standing V3-C/D/E: action 변환과 rollout의 조건부 비교
+
+`--action-mapping clip|tanh`는 환경 안에서 raw Gaussian action을 bounded 명령으로 변환한다. 기본값은 `clip`이다. `tanh`를 선택해도 PPO 분포, storage, log-prob은 raw Gaussian 기준을 유지하며 Jacobian 보정을 추가하지 않는다. 이후 smoothing, action scale과 관절 목표 제한은 기존과 같다. 관측 30:42는 직전에 적용한 smoothed action이다. `--rollout 16|32`의 기본값은 16이며 나머지 PPO 설정은 유지한다.
+
+`--ablation-parent <summary.json> --ablation-name v3c|v3d|v3e`를 지정하면 먼저 25회 학습하고 세 평가 seed에서 총 48 episode를 비교한다. 세 seed 모두 zero보다 최대·누적 자세 오차가 작고 안전하면 `SUCCESS`, parent보다 두 오차가 각각 15% 이상 줄고 안전성 및 행동/복구 개선을 확인하면 `PARTIAL`이다. 어느 조건도 충족하지 못하면 승격하지 않고 `FAIL`로 기록한다. `SUCCESS` 또는 `PARTIAL`에서만 현재 학습 상태를 보존해 100회까지 연장하고 25/50/75/100 중 안전한 최적 checkpoint를 선택한다. 이 옵션은 한 후보를 평가하며, 다음 후보 선택은 기록된 판정에 따라 수행한다. 각 실험은 이전 결과와 섞이지 않는 새 출력 경로를 사용한다.
+
+공통 training seed 42424, warm-up seed 52424로 V3-A parent 25회, V3-C 25회, V3-E 100회를 실행했다. V3-C는 경계 포화를 줄였지만 오차 개선이 8.52%/9.31%로 승격 기준에 못 미쳐 중단했고 V3-D는 건너뛰었다. V3-E는 V3-A에서 rollout만 32로 바꿨으며 25회에서 16.58%/19.06% 개선되어 연장했다. 최적 75회 정책도 zero보다 최대·누적 오차가 커서 `PARTIAL`이며 기립 성공 기준으로 채택하지 않는다. 자동 튜닝은 종료했다.
+
+모든 checkpoint의 관절별 action 편향·previous action 관측 이동·안전성·재현 명령과 비교 한계는 [Standing V3-C/D/E 보고서](STANDING_V3CDE.md)에 기록했다. 물리 모델과 정규화 구현, reward 기본값 `0.05`는 유지한다. rollout 32는 같은 update 수에서 환경 표본 수를 두 배로 늘리므로 개선을 기여도 할당 효과만으로 해석할 수 없다.

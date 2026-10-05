@@ -34,10 +34,13 @@ class StandingCfg:
     self_collision_failure: bool = True
     recovery_degrees: float = .1
     orientation_reward_scale: float = .05
+    action_mapping: str = 'clip'
     min_height: float = .10
     max_tilt_degrees: float = 45.
 
     def __post_init__(self):
+        if self.action_mapping not in ('clip','tanh'):
+            raise ValueError('action mapping은 clip 또는 tanh여야 합니다.')
         if self.v2_stage is not None and self.v2_stage not in V2_DISTURBANCES:
             raise ValueError('V2 외란 단계는 A, B, C, D 중 하나여야 합니다.')
         if self.reference_standing_orientation is not None and (len(self.reference_standing_orientation) != 3 or not all(math.isfinite(v) for v in self.reference_standing_orientation)):
