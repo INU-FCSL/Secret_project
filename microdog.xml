@@ -21,6 +21,9 @@
     <material name="ground_mat" rgba="0.82 0.84 0.86 1"/>
   </asset>
 
+  <!-- 충돌 비트: 1=일반 형상, 2=몸통, 4=머리 yaw 모터,
+       8=머리 roll 모터/외피, 16=꼬리 pitch 및 다리 upper 모터.
+       2↔16, 4↔8만 제외하며 나머지 자기충돌과 지면 충돌은 유지한다. -->
   <worldbody>
     <light pos="0 -1 2" dir="0 0 -1" directional="true"/>
     <geom name="floor" type="plane" size="2 2 0.05" material="ground_mat"/>
@@ -28,7 +31,7 @@
     <!-- ~25 cm class MicroDog preview body -->
     <body name="base" pos="0 0 0.215">
       <freejoint/>
-      <geom name="torso" type="box" size="0.105 0.055 0.032"
+      <geom contype="2" conaffinity="15" name="torso" type="box" size="0.105 0.055 0.032"
             mass="0.42" material="body_mat"/>
 
       <!-- simple top electronics/battery volume -->
@@ -38,14 +41,14 @@
       <!-- head, 3 DOF visual/servo chain -->
       <body name="head_yaw" pos="0.118 0 0.015">
         <joint name="head_yaw_joint" type="hinge" axis="0 0 1" range="-70 70"/>
-        <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
+        <geom contype="4" conaffinity="23" type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
         <body name="head_pitch">
           <joint name="head_pitch_joint" type="hinge" axis="0 1 0" range="-45 45"/>
           <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
           <body name="head_roll">
             <joint name="head_roll_joint" type="hinge" axis="1 0 0" range="-35 35"/>
-            <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
-            <geom name="head_shell" type="box" pos="0.030 0 0"
+            <geom contype="8" conaffinity="27" type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
+            <geom contype="8" conaffinity="27" name="head_shell" type="box" pos="0.030 0 0"
                   size="0.035 0.040 0.030" mass="0.07" material="body_mat"/>
             <geom name="camera" type="box" pos="0.066 0 0.004"
                   size="0.008 0.020 0.014" mass="0.01" material="accent_mat"/>
@@ -59,7 +62,7 @@
         <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
         <body name="tail_pitch">
           <joint name="tail_pitch_joint" type="hinge" axis="0 1 0" range="-35 35"/>
-          <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
+          <geom contype="16" conaffinity="29" type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
           <geom type="capsule" fromto="-0.005 0 0 -0.080 0 0"
                 size="0.008" mass="0.025" material="accent_mat"/>
         </body>
@@ -71,7 +74,7 @@
         <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
         <body name="fl_upper">
           <joint name="fl_hip_pitch_joint" type="hinge" axis="0 1 0" range="-80 80"/>
-          <geom type="box" size="0.013 0.010 0.017" mass="0.018" material="motor_mat"/>
+          <geom contype="16" conaffinity="29" type="box" size="0.013 0.010 0.017" mass="0.018" material="motor_mat"/>
           <geom type="capsule" fromto="0 0 -0.015 0 0 -0.090"
                 size="0.009" mass="0.025" material="link_mat"/>
           <body name="fl_lower" pos="0 0 -0.090">
@@ -91,7 +94,7 @@
         <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
         <body name="fr_upper">
           <joint name="fr_hip_pitch_joint" type="hinge" axis="0 1 0" range="-80 80"/>
-          <geom type="box" size="0.013 0.010 0.017" mass="0.018" material="motor_mat"/>
+          <geom contype="16" conaffinity="29" type="box" size="0.013 0.010 0.017" mass="0.018" material="motor_mat"/>
           <geom type="capsule" fromto="0 0 -0.015 0 0 -0.090"
                 size="0.009" mass="0.025" material="link_mat"/>
           <body name="fr_lower" pos="0 0 -0.090">
@@ -111,7 +114,7 @@
         <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
         <body name="rl_upper">
           <joint name="rl_hip_pitch_joint" type="hinge" axis="0 1 0" range="-80 80"/>
-          <geom type="box" size="0.013 0.010 0.017" mass="0.018" material="motor_mat"/>
+          <geom contype="16" conaffinity="29" type="box" size="0.013 0.010 0.017" mass="0.018" material="motor_mat"/>
           <geom type="capsule" fromto="0 0 -0.015 0 0 -0.090"
                 size="0.009" mass="0.025" material="link_mat"/>
           <body name="rl_lower" pos="0 0 -0.090">
@@ -131,7 +134,7 @@
         <geom type="box" size="0.010 0.013 0.017" mass="0.018" material="motor_mat"/>
         <body name="rr_upper">
           <joint name="rr_hip_pitch_joint" type="hinge" axis="0 1 0" range="-80 80"/>
-          <geom type="box" size="0.013 0.010 0.017" mass="0.018" material="motor_mat"/>
+          <geom contype="16" conaffinity="29" type="box" size="0.013 0.010 0.017" mass="0.018" material="motor_mat"/>
           <geom type="capsule" fromto="0 0 -0.015 0 0 -0.090"
                 size="0.009" mass="0.025" material="link_mat"/>
           <body name="rr_lower" pos="0 0 -0.090">
