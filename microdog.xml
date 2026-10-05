@@ -151,27 +151,27 @@
   </worldbody>
 
   <actuator>
-    <position joint="fl_hip_roll_joint"  ctrlrange="-35 35"/>
-    <position joint="fl_hip_pitch_joint" ctrlrange="-80 80"/>
-    <position joint="fl_knee_joint"      ctrlrange="-5 135"/>
+    <position joint="fl_hip_roll_joint"  ctrlrange="-0.6108652381980153 0.6108652381980153"/>
+    <position joint="fl_hip_pitch_joint" ctrlrange="-1.3962634015954636 1.3962634015954636"/>
+    <position joint="fl_knee_joint"      ctrlrange="-0.087266462599716474 2.3561944901923448"/>
 
-    <position joint="fr_hip_roll_joint"  ctrlrange="-35 35"/>
-    <position joint="fr_hip_pitch_joint" ctrlrange="-80 80"/>
-    <position joint="fr_knee_joint"      ctrlrange="-5 135"/>
+    <position joint="fr_hip_roll_joint"  ctrlrange="-0.6108652381980153 0.6108652381980153"/>
+    <position joint="fr_hip_pitch_joint" ctrlrange="-1.3962634015954636 1.3962634015954636"/>
+    <position joint="fr_knee_joint"      ctrlrange="-0.087266462599716474 2.3561944901923448"/>
 
-    <position joint="rl_hip_roll_joint"  ctrlrange="-35 35"/>
-    <position joint="rl_hip_pitch_joint" ctrlrange="-80 80"/>
-    <position joint="rl_knee_joint"      ctrlrange="-5 135"/>
+    <position joint="rl_hip_roll_joint"  ctrlrange="-0.6108652381980153 0.6108652381980153"/>
+    <position joint="rl_hip_pitch_joint" ctrlrange="-1.3962634015954636 1.3962634015954636"/>
+    <position joint="rl_knee_joint"      ctrlrange="-0.087266462599716474 2.3561944901923448"/>
 
-    <position joint="rr_hip_roll_joint"  ctrlrange="-35 35"/>
-    <position joint="rr_hip_pitch_joint" ctrlrange="-80 80"/>
-    <position joint="rr_knee_joint"      ctrlrange="-5 135"/>
+    <position joint="rr_hip_roll_joint"  ctrlrange="-0.6108652381980153 0.6108652381980153"/>
+    <position joint="rr_hip_pitch_joint" ctrlrange="-1.3962634015954636 1.3962634015954636"/>
+    <position joint="rr_knee_joint"      ctrlrange="-0.087266462599716474 2.3561944901923448"/>
 
-    <position joint="head_yaw_joint"   ctrlrange="-70 70"/>
-    <position joint="head_pitch_joint" ctrlrange="-45 45"/>
-    <position joint="head_roll_joint"  ctrlrange="-35 35"/>
-    <position joint="tail_yaw_joint"   ctrlrange="-55 55"/>
-    <position joint="tail_pitch_joint" ctrlrange="-35 35"/>
+    <position joint="head_yaw_joint"   ctrlrange="-1.2217304763960306 1.2217304763960306"/>
+    <position joint="head_pitch_joint" ctrlrange="-0.78539816339744828 0.78539816339744828"/>
+    <position joint="head_roll_joint"  ctrlrange="-0.6108652381980153 0.6108652381980153"/>
+    <position joint="tail_yaw_joint"   ctrlrange="-0.95993108859688125 0.95993108859688125"/>
+    <position joint="tail_pitch_joint" ctrlrange="-0.6108652381980153 0.6108652381980153"/>
   </actuator>
 
   <!-- 중립 기립 자세: 다리 roll=0°, pitch=-15.414921337176°, knee=30°.
