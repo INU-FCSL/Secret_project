@@ -173,11 +173,13 @@ def main():
     parser.add_argument('--checkpoint',type=Path)
     parser.add_argument('--random',action='store_true')
     parser.add_argument('--scripted',action='store_true')
+    parser.add_argument('--orientation-reward-scale',type=float,default=.05)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     cfg=StandingCfg(num_envs=args.num_envs,stage=args.stage,v2_stage=args.v2_stage,
         smoothing_seconds=args.smoothing_tau,seed=args.seed,episode_seconds=args.seconds,
-        push_force=args.push_force,balanced_push_directions=True)
+        push_force=args.push_force,balanced_push_directions=True,
+        orientation_reward_scale=args.orientation_reward_scale)
     result=evaluate(cfg,args.checkpoint,args.random,args.scripted)
     args.output.write_text(json.dumps(result,indent=2,allow_nan=False))
     print(f'평가 결과 저장: {args.output}')

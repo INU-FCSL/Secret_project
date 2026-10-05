@@ -33,6 +33,7 @@ class StandingCfg:
     reference_standing_height: float | None = None
     self_collision_failure: bool = True
     recovery_degrees: float = .1
+    orientation_reward_scale: float = .05
     min_height: float = .10
     max_tilt_degrees: float = 45.
 
@@ -45,6 +46,8 @@ class StandingCfg:
             raise ValueError('목표 높이는 유한한 양수여야 합니다.')
         if self.recovery_degrees <= 0:
             raise ValueError('복구 각도 문턱은 양수여야 합니다.')
+        if not math.isfinite(self.orientation_reward_scale) or self.orientation_reward_scale <= 0:
+            raise ValueError('자세 보상 scale은 유한한 양수여야 합니다.')
         if self.stage not in (0, 1, 2, 3) or self.push_seconds <= 0 or (self.push_force is not None and self.push_force < 0):
             raise ValueError('단계는 0~3, 외력은 음수가 아니어야 합니다.')
         if self.num_envs < 1 or self.decimation < 1 or self.episode_seconds <= 0:

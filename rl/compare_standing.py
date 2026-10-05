@@ -108,17 +108,43 @@ def policy_probe(checkpoint,data):
     return dict(observations=observations,local_feedback=feedback)
 
 
-def compare(v2,v3,output):
+def gate_decision(results):
+    """25회 결과의 물리 오차·피드백·경계 편향으로 연장 여부를 판정한다."""
+    policy=results['v3b_25'];zero=results['zero'];previous=results['v3a_25']
+    metrics=policy['aggregate'];baseline=zero['aggregate'];old=previous['aggregate']
+    feedback=policy['policy_probe']['local_feedback']
+    correct=feedback['roll']['position_per_degree']['mean']>0 and feedback['pitch']['position_per_degree']['mean']<0
+    clipping=policy['actions']['outside_range_fraction']
+    severe_peak=metrics['peak_orientation_error']>1.5*baseline['peak_orientation_error']
+    severe_integrated=metrics['integrated_orientation_error']>2*baseline['integrated_orientation_error']
+    early_failure=severe_peak and severe_integrated and (not correct or clipping>.25)
+    safe=metrics['survival_rate']==1 and metrics['self_contact_env_steps']==0 and metrics['unexpected_contact_env_steps']==0 and metrics['saturation_fraction']<.01
+    promising=(metrics['peak_orientation_error']<.9*old['peak_orientation_error'] or
+               metrics['integrated_orientation_error']<.9*old['integrated_orientation_error'] or
+               metrics['peak_orientation_error']<=1.1*baseline['peak_orientation_error'] or
+               correct or clipping<.5*previous['actions']['outside_range_fraction'])
+    return dict(extend_to_100=bool(safe and promising and not early_failure),early_failure=bool(early_failure),
+                severe_peak=bool(severe_peak),severe_integrated=bool(severe_integrated),
+                correct_local_feedback=bool(correct),clipping_fraction=clipping,safe=bool(safe),promising=bool(promising),
+                thresholds=dict(severe_peak_ratio=1.5,severe_integrated_ratio=2.,high_clipping=.25,
+                                meaningful_v3a_ratio=.9,near_zero_peak_ratio=1.1),
+                reason='큰 물리 오차와 잘못된 피드백 또는 높은 clipping이면 연장하지 않습니다. 안전한 개선 징후가 있을 때만 연장합니다.')
+
+
+def compare(v2,v3,output,*,v3b=None,checkpoints=(0,25,50,75,100),legacy_checkpoints=(0,25,50,75,100),orientation_reward_scale=.05):
     output.mkdir(parents=True,exist_ok=True)
     policies=[('zero',None),('random',None),('scripted',None)]
     for prefix,directory in [('v2',v2),('v3a',v3)]:
-        policies.extend((f'{prefix}_{i}',directory/f'checkpoint_{i}.pt') for i in (0,25,50,75,100))
+        policies.extend((f'{prefix}_{i}',directory/f'checkpoint_{i}.pt') for i in legacy_checkpoints)
+    if v3b is not None:
+        policies.extend((f'v3b_{i}',v3b/f'checkpoint_{i}.pt') for i in checkpoints)
     results={};base_initial=None;base_push=None
     for name,path in policies:
         rows=[];traces=[]
         for seed in (2026,2027,2028):
             cfg=StandingCfg(num_envs=16,seed=seed,stage=2,v2_stage='A',smoothing_seconds=.15,
-                            episode_seconds=10.,balanced_push_directions=True)
+                            episode_seconds=10.,balanced_push_directions=True,
+                            orientation_reward_scale=orientation_reward_scale)
             recorder=ActionTrace()
             row=evaluate(cfg,checkpoint=path,random=name=='random',scripted=name=='scripted',step_callback=recorder)
             arrays=recorder.arrays()
@@ -129,7 +155,8 @@ def compare(v2,v3,output):
             base_initial=data['raw'][0].copy();base_push=data['push_start'][0].copy()
         if not np.array_equal(base_initial,data['raw'][0]) or not np.array_equal(base_push,data['push_start'][0]):
             raise RuntimeError('제어기별 초기 관측 또는 외란 시작 시점이 다릅니다.')
-        summary=dict(per_seed=rows,aggregate=aggregate(rows),actions=action_summary(data),matched_initial_and_push=True)
+        summary=dict(per_seed=rows,aggregate=aggregate(rows),actions=action_summary(data),matched_initial_and_push=True,
+                     orientation_reward_scale=orientation_reward_scale)
         if path is not None:
             state=torch.load(path,weights_only=False,map_location='cpu')
             actor_state=state['actor_state_dict']
@@ -141,7 +168,8 @@ def compare(v2,v3,output):
         results[name]=summary
         (output/'comparison.json').write_text(json.dumps(results,indent=2,allow_nan=False))
         print(f"평가 완료: {name}, 최대={summary['aggregate']['peak_orientation_error']:.6f}°, 적분={summary['aggregate']['integrated_orientation_error']:.6f}",flush=True)
-    final=results['v3a_100'];zero=results['zero']
+    final=results[f'v3b_{max(checkpoints)}'] if v3b is not None else results['v3a_100']
+    zero=results['zero']
     per_seed=[]
     for row,baseline in zip(final['per_seed'],zero['per_seed']):
         safe=row['survival_rate']==1 and row['self_contact_env_steps']==0 and row['unexpected_contact_env_steps']==0 and row['saturation_fraction']<.01
@@ -149,16 +177,24 @@ def compare(v2,v3,output):
             integrated_improved=row['integrated_orientation_error']<baseline['integrated_orientation_error'],safe=safe))
     verdict=dict(success=all(r['peak_improved'] and r['integrated_improved'] and r['safe'] for r in per_seed),per_seed=per_seed,
         boundary_bias=final['actions']['outside_range_fraction']>.5,
-        training_seed_difference='V2와 V3-A의 학습 seed가 달라 정규화 효과의 재현성은 추가 학습 seed 검증이 필요합니다.')
+        training_seed_difference='버전별 학습 seed가 달라 변경 효과의 학습 재현성은 추가 학습 seed 검증이 필요합니다.')
     (output/'verdict.json').write_text(json.dumps(verdict,indent=2,allow_nan=False))
+    if 'v3b_25' in results and 'v3a_25' in results:
+        (output/'gate.json').write_text(json.dumps(gate_decision(results),indent=2,allow_nan=False))
+    return results
 
 
 def main():
-    parser=argparse.ArgumentParser(description='V2와 V3-A의 동일 조건 평가')
+    parser=argparse.ArgumentParser(description='V2·V3-A·V3-B의 동일 조건 평가')
     parser.add_argument('--v2',type=Path,required=True)
     parser.add_argument('--v3',type=Path,required=True)
+    parser.add_argument('--v3b',type=Path)
+    parser.add_argument('--checkpoints',type=int,nargs='+',default=[0,25,50,75,100])
+    parser.add_argument('--legacy-checkpoints',type=int,nargs='+',default=[0,25,50,75,100])
+    parser.add_argument('--orientation-reward-scale',type=float,default=.05)
     parser.add_argument('--output',type=Path,required=True)
-    args=parser.parse_args();compare(args.v2,args.v3,args.output)
+    args=parser.parse_args();compare(args.v2,args.v3,args.output,v3b=args.v3b,checkpoints=args.checkpoints,
+        legacy_checkpoints=args.legacy_checkpoints,orientation_reward_scale=args.orientation_reward_scale)
 
 
 if __name__=='__main__':

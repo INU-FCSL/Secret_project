@@ -190,3 +190,16 @@ Stage A에서 64개 환경, 100 update, rollout 16, 학습 seed 314를 사용했
 통계 수집 중 가중치·통계 불변, 반복 관측 일치, 실제 rollout의 갱신 전 KL을 검사한 후에만 PPO 학습한다. 모든 학습 갱신에서 통계와 갱신 전 KL을 다시 확인한다. 전체 통계를 float64로 계산하고 저장 buffer 형식으로 변환하여 작은 중력 분산의 소실을 방지한다. 보상·action·관측 정의·필터·외란·PPO hyperparameter는 유지하며 seed만 이번 실험의 명시값으로 설정한다.
 
 100회 실험은 갱신 전 KL 문제를 제거했지만 최종 정책의 zero 대비 복구 개선을 달성하지 못했다. 추가 iteration은 실행하지 않았다. 상세 결과와 다음 비교 후보는 [Standing V3-A 보고서](STANDING_V3A.md)에 기록했다.
+
+## Standing V3-B: 자세 보상 scale 비교와 25회 판정
+
+`StandingCfg.orientation_reward_scale` 및 `--orientation-reward-scale`로 scale을 선택한다. 기본값은 기존 `0.05`이며 V3-B에서는 `0.01`을 명시한다. 나머지 보상항·weight·물리·PPO 설정·정규화 준비 방식은 유지한다. 기존 checkpoint 평가는 기본값으로 실행할 수 있으며, 버전별 return을 비교할 때는 모든 제어기에 같은 scale을 적용한다.
+
+```bash
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.reward_validation --trajectories /tmp/microdog_v3a/evaluation --output /tmp/microdog_v3b/preflight
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.train --num-envs 64 --iterations 100 --v2-stage A --smoothing-tau .15 --episode-seconds 10 --seed 31415 --normalization warmup-frozen --warmup-steps 500 --warmup-seed 41415 --orientation-reward-scale .01 --gate-after-25 --v2-baseline /tmp/microdog_v2/ppo --v3a-baseline /tmp/microdog_v3a/ppo --log-dir /tmp/microdog_v3b/ppo
+```
+
+학습 상한은 100회다. 먼저 25회만 실행하고 별도 프로세스에서 세 seed의 동일 48 episode를 평가한다. 이때 학습 환경·optimizer·난수 상태를 보존한다. zero보다 최대 오차가 1.5배, 누적 오차가 2배를 넘으면서 국소 자세 feedback 부호가 틀리거나 요청 clipping이 25%를 넘으면 조기 실패로 판정한다. 이 조건을 충족하지 않고 안전한 개선 징후가 있을 때만 남은 75회를 연장한다. 구체적인 조건과 결과는 `gate.json`에 기록한다.
+
+저장 trajectory 재점수화는 물리를 다시 실행하지 않고 보존된 자세와 나머지 보상항을 사용한다. 실제 평형 기준 민감도와 네 외란 방향의 1·5·10·25·50 step 순서도 학습 전에 검사한다. 출력 자료와 checkpoint는 `/tmp`에 보관하며 실험을 다시 실행할 때는 새로운 출력 경로를 선택한다. 상세 결과는 [Standing V3-B 보고서](STANDING_V3B.md)에 기록한다.

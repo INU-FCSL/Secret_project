@@ -245,7 +245,8 @@ class StandingEnv(VecEnv):
         reward, terms = standing_rewards(gravity, self.qpos[:, 2],
             self.qpos[:, self.qpos_ids] - self.default_joint_position,
             self.qvel[:, self.qvel_ids], applied_delta, self.torque[:, :12],
-            reference_gravity=self.reference_gravity, reference_height=self.reference_standing_height)
+            reference_gravity=self.reference_gravity, reference_height=self.reference_standing_height,
+            orientation_reward_scale=self.cfg.orientation_reward_scale)
         reward = torch.where(finite, reward * self.cfg.step_dt, torch.zeros_like(reward))
         reasons = dict(invalid=~finite, low_height=self.qpos[:, 2] < self.cfg.min_height,
             tilt=gravity[:, 2] > -math.cos(math.radians(self.cfg.max_tilt_degrees)),

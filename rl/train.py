@@ -6,6 +6,7 @@ import hashlib
 import subprocess
 import json
 import random
+import sys
 import numpy as np
 import torch
 from rsl_rl.runners import OnPolicyRunner
@@ -28,12 +29,20 @@ def main():
     parser.add_argument('--normalization', choices=['running', 'warmup-frozen'], default='running')
     parser.add_argument('--warmup-steps', type=int, default=500)
     parser.add_argument('--warmup-seed', type=int)
+    parser.add_argument('--orientation-reward-scale', type=float, default=.05)
+    parser.add_argument('--gate-after-25', action='store_true')
+    parser.add_argument('--v2-baseline', type=Path)
+    parser.add_argument('--v3a-baseline', type=Path)
     args = parser.parse_args()
     if args.iterations < 1:
         parser.error('iteration은 양수여야 합니다.')
+    if args.gate_after_25 and (args.iterations != 100 or args.normalization != 'warmup-frozen'
+                              or args.v2_baseline is None or args.v3a_baseline is None):
+        parser.error('25회 판정은 100회 상한, 정규화 고정, V2/V3-A 기준 경로가 필요합니다.')
     env_cfg = StandingCfg(num_envs=args.num_envs, seed=args.seed, stage=2 if args.v2_stage else args.stage,
                           v2_stage=args.v2_stage, smoothing_seconds=args.smoothing_tau,
-                          episode_seconds=args.episode_seconds)
+                          episode_seconds=args.episode_seconds,
+                          orientation_reward_scale=args.orientation_reward_scale)
     frozen = args.normalization == 'warmup-frozen'
     if frozen:
         random.seed(args.seed)
@@ -72,6 +81,7 @@ def main():
         print(f"관측 준비 검증 통과: {normalization['observations']}개, 갱신 전 KL={preflight['exact_kl']:.9g}", flush=True)
     initial_state = runner.alg.save()
     checkpoint_infos = {'completed_updates': 0}
+    checkpoint_infos['orientation_reward_scale'] = env_cfg.orientation_reward_scale
     if frozen:
         checkpoint_infos['normalization'] = normalization
     initial_state.update(iter=0, infos=checkpoint_infos)
@@ -83,6 +93,7 @@ def main():
         def save_frozen_checkpoint(path, infos=None):
             metadata = dict(infos or {})
             metadata['normalization'] = normalization
+            metadata['orientation_reward_scale'] = env_cfg.orientation_reward_scale
             metadata.setdefault('completed_updates', len(metrics))
             native_save(path, infos=metadata)
         runner.save = save_frozen_checkpoint
@@ -158,7 +169,23 @@ def main():
         return result
     runner.alg.update = checked_update
     try:
-        runner.learn(args.iterations, init_at_random_ep_len=False)
+        if args.gate_after_25:
+            runner.learn(25, init_at_random_ep_len=False)
+            gate_output=args.log_dir.parent/'gate_evaluation'
+            command=[sys.executable,'-m','rl.compare_standing','--v2',str(args.v2_baseline),
+                '--v3',str(args.v3a_baseline),'--v3b',str(args.log_dir),'--checkpoints','0','25',
+                '--legacy-checkpoints','0','25','100','--orientation-reward-scale',str(env_cfg.orientation_reward_scale),
+                '--output',str(gate_output)]
+            # 별도 프로세스에서 평가해 학습 환경·optimizer·난수 상태를 보존한다.
+            subprocess.run(command,check=True)
+            gate=json.loads((gate_output/'gate.json').read_text())
+            (args.log_dir/'gate.json').write_text(json.dumps(gate,indent=2,allow_nan=False))
+            print(f"25회 판정: 100회 연장={gate['extend_to_100']}",flush=True)
+            if gate['extend_to_100']:
+                runner.current_learning_iteration=len(metrics)
+                runner.learn(75, init_at_random_ep_len=False)
+        else:
+            runner.learn(args.iterations, init_at_random_ep_len=False)
         if not all(torch.isfinite(p).all() for p in runner.alg.actor.parameters()):
             raise RuntimeError('학습된 actor에 유한하지 않은 값이 있습니다.')
         (args.log_dir / 'losses.json').write_text(json.dumps(losses, indent=2))
@@ -167,7 +194,8 @@ def main():
             (args.log_dir / 'normalization_final.json').write_text(json.dumps({
                 'statistics_unchanged': True, 'actor_count': int(runner.alg.actor.obs_normalizer.count),
                 'critic_count': int(runner.alg.critic.obs_normalizer.count),
-                'training_transitions': args.iterations*cfg['num_steps_per_env']*env.num_envs,
+                'completed_updates': len(metrics),
+                'training_transitions': len(metrics)*cfg['num_steps_per_env']*env.num_envs,
                 'normalization': normalization}, indent=2, allow_nan=False))
     finally:
         env.close()
