@@ -111,4 +111,43 @@ class StandingTests(unittest.TestCase):
         self.assertEqual(tuple(action.shape),(4,12))
         self.assertTrue(torch.isfinite(action).all())
 
+class RobustStandingTests(unittest.TestCase):
+    def test_reset_seed_bounds_and_push_clear(self):
+        e = StandingEnv(StandingCfg(num_envs=4, stage=2, seed=123))
+        try:
+            e._rng.manual_seed(123)
+            e.reset()
+            snapshot = (e.qpos.clone(), e.qvel.clone(), e.push_start.clone(), e.push_vector.clone())
+            self.assertLessEqual(float(e.qvel[:, e.qvel_ids].abs().max()), .010001)
+            self.assertLessEqual(float(e.qvel[:, 3:5].abs().max()), .020001)
+            offsets = (e.qpos[:, e.qpos_ids]-e.default_joint_position).abs()
+            limit = torch.tensor([.1, .5, .5]*4, device=e.device).deg2rad()
+            self.assertTrue((offsets <= limit+1e-7).all())
+            self.assertTrue(torch.allclose(e.push_vector.norm(dim=-1), torch.ones(4, device=e.device)))
+            self.assertTrue(((e.push_start >= 2) & (e.push_start <= 3)).all())
+            e._rng.manual_seed(123)
+            e.reset()
+            for current, expected in zip((e.qpos,e.qvel,e.push_start,e.push_vector), snapshot):
+                self.assertTrue(torch.equal(current,expected))
+            e.push_start[:] = 0
+            _, _, _, info = e.step(torch.zeros((4,12), device=e.device))
+            self.assertTrue(info['diagnostics']['push_active'].all())
+            self.assertTrue(torch.allclose(e.external_force[:,e.base_id,:3], e.push_vector))
+            e.reset([0])
+            self.assertFalse(e.external_force[0].any())
+            e.push_start[:] = -1
+            e.step(torch.zeros((4,12),device=e.device))
+            self.assertFalse(e.external_force.any())
+        finally:
+            e.close()
+
+    def test_reward_tilt_separation(self):
+        device = 'cuda:0'
+        angle = torch.tensor([0.,2.,10.,44.,90.],device=device).deg2rad()
+        gravity = torch.stack((angle.sin(),torch.zeros_like(angle),-angle.cos()),-1)
+        zero = torch.zeros((5,12),device=device)
+        score,terms=standing_rewards(gravity,torch.full((5,),.1927,device=device),zero,zero,zero,zero)
+        self.assertTrue((score[:2]>score[1:3]).all())
+        self.assertLess(float(terms['upright'][1]), 1.)
+
 if __name__=='__main__': unittest.main()

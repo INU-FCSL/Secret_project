@@ -97,6 +97,11 @@ class StandingEnv(VecEnv):
         with wp.ScopedDevice(self.device):
             self._events_wp = wp.zeros((self.num_envs, 2), dtype=wp.int32)
         self._events = wp.to_torch(self._events_wp)
+        self._rng = torch.Generator(device=self.device).manual_seed(cfg.seed)
+        self.external_force = wp.to_torch(self.sim.wp_data.xfrc_applied)
+        self.base_id = m.body("base").id
+        self.push_start = torch.zeros(self.num_envs, device=self.device)
+        self.push_vector = torch.zeros((self.num_envs, 3), device=self.device)
         self.reset()
 
     @contextmanager
@@ -114,12 +119,41 @@ class StandingEnv(VecEnv):
             self.sim.reset(ids)
             self.qpos[ids] = self.initial_qpos
             self.qvel[ids] = 0
+            self.external_force[ids] = 0
+            count = len(ids)
+            def uniform(shape):
+                return 2 * torch.rand(shape, generator=self._rng, device=self.device) - 1
+            if self.cfg.stage >= 1:
+                factor = 1.5 if self.cfg.stage == 3 else 1.
+                angles = uniform((count, 2)) * math.radians(2) * factor
+                roll, pitch = angles[:, 0] / 2, angles[:, 1] / 2
+                self.qpos[ids, 3:7] = torch.stack((roll.cos()*pitch.cos(),
+                    roll.sin()*pitch.cos(), roll.cos()*pitch.sin(), -roll.sin()*pitch.sin()), -1)
+                noise_scale = torch.tensor((math.radians(.1), math.radians(.5), math.radians(.5))*4,
+                                           device=self.device) * factor
+                self.qpos[ids[:, None], self.qpos_ids] += uniform((count, 12)) * noise_scale
+                self.qvel[ids[:, None], self.qvel_ids] = uniform((count, 12)) * .01
+                self.qvel[ids, 3:5] = uniform((count, 2)) * .02
+            self.push_start[ids] = 2. + (uniform((count,)) + 1.) / 2.
+            magnitude = self.cfg.push_force
+            if magnitude is None:
+                magnitude = (0., 0., 1., 2.)[self.cfg.stage]
+            axis = torch.randint(0, 2, (count,), generator=self._rng, device=self.device)
+            sign = torch.randint(0, 2, (count,), generator=self._rng, device=self.device) * 2 - 1
+            self.push_vector[ids] = 0
+            self.push_vector[ids, axis] = float(magnitude) * sign
             self.ctrl[ids] = self.initial_ctrl
             self.previous_actions[ids] = 0
             self.requested_actions[ids] = 0
             self.joint_targets[ids] = self.default_joint_position
             self.episode_length_buf[ids] = 0
             self.sim.forward()
+            if self.cfg.stage >= 1:
+                # 초기 상태에서 발과 바닥의 관통을 피하도록 높이를 보정한다.
+                foot_positions = wp.to_torch(self.sim.wp_data.geom_xpos)
+                bottom = (foot_positions[ids[:, None], self._feet, 2] - .016).min(-1).values
+                self.qpos[ids, 2] -= bottom + 1e-6
+                self.sim.forward()
         return self.get_observations()
 
     def projected_gravity(self):
@@ -176,7 +210,13 @@ class StandingEnv(VecEnv):
             self._events.zero_()
             self.ctrl[:, :12] = self.joint_targets
             self.ctrl[:, 12:] = 0
-            for _ in range(self.cfg.decimation):
+            push_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            for substep in range(self.cfg.decimation):
+                time = self.episode_length_buf * self.cfg.step_dt + substep * self.cfg.timestep
+                active = (time >= self.push_start) & (time < self.push_start + self.cfg.push_seconds)
+                self.external_force.zero_()
+                self.external_force[:, self.base_id, :3] = self.push_vector * active[:, None]
+                push_active |= active & (self.push_vector.norm(dim=-1) > 0)
                 self.sim.step()
                 peak = torch.maximum(peak, self.torque[:, :12].abs())
                 saturation += self.torque[:, :12].abs() >= .52 - 1e-6
@@ -206,10 +246,17 @@ class StandingEnv(VecEnv):
         diagnostics = dict(height=self.qpos[:, 2].clone(), gravity=gravity.clone(),
             feet=feet.clone(), self_contacts=self_contacts.clone(), peak_torque=peak,
             saturation_steps=saturation, targets=self.joint_targets.clone(),
-            applied_actions=self.previous_actions.clone(), reasons=reasons)
+            applied_actions=self.previous_actions.clone(), reasons=reasons,
+            push_active=push_active, push_start=self.push_start.clone(),
+            push_force=self.push_vector.clone(), episode_steps=self.episode_length_buf.clone(),
+            roll=torch.atan2(-gravity[:, 1], -gravity[:, 2]),
+            pitch=torch.asin(gravity[:, 0].clamp(-1, 1)),
+            terminated=terminated, reward_terms={k: v.clone() for k, v in terms.items()})
         extras = {'time_outs': timeout & ~terminated, 'diagnostics': diagnostics,
                   'terminal_observation': terminal_obs,
-                  'log': {f'Reward/{k}': torch.nan_to_num(v).mean() for k, v in terms.items()}}
+                  'log': {**{f'Reward/{k}': torch.nan_to_num(v).mean() for k, v in terms.items()},
+                          'Task/termination_rate': terminated.float().mean(),
+                          'Task/four_foot_fraction': feet.all(-1).float().mean()}}
         if done.any():
             self.reset(torch.where(done)[0])
         return self.get_observations(), reward, done.long(), extras

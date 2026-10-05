@@ -6,7 +6,7 @@ from .config import REWARD_WEIGHTS
 def standing_rewards(gravity, height, position_offsets, velocities, action_delta, torque):
     height_error = torch.clamp(torch.abs(height - .1927) - .005, min=0)
     terms = {
-        'upright': torch.exp(-gravity[:, :2].square().sum(-1) / .2**2)
+        'upright': torch.exp(-gravity[:, :2].square().sum(-1) / .05**2)
                    * (-gravity[:, 2]).clamp(0, 1),
         'height': torch.exp(-height_error.square() / .02**2),
         'pose': torch.exp(-position_offsets.square().mean(-1) / .1**2),

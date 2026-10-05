@@ -22,10 +22,15 @@ class StandingCfg:
     decimation: int = 10
     episode_seconds: float = 20.
     smoothing_seconds: float = .75
+    stage: int = 0
+    push_force: float | None = None
+    push_seconds: float = .15
     min_height: float = .10
     max_tilt_degrees: float = 45.
 
     def __post_init__(self):
+        if self.stage not in (0, 1, 2, 3) or self.push_seconds <= 0 or (self.push_force is not None and self.push_force < 0):
+            raise ValueError('단계는 0~3, 외력은 음수가 아니어야 합니다.')
         if self.num_envs < 1 or self.decimation < 1 or self.episode_seconds <= 0:
             raise ValueError('환경 수, decimation, episode 길이는 양수여야 합니다.')
         if self.timestep != .002 or self.smoothing_seconds <= 0:

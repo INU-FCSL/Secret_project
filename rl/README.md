@@ -1,4 +1,4 @@
-# MicroDog 기립 학습 초기 환경
+# MicroDog 기립 복구 학습 환경
 
 `feature/standing-rl`에서 검증된 `microdog.xml`을 직접 읽는다. XML과 기존 실행 스크립트는 변경하지 않는다. mjlab의 `Simulation`이 MuJoCo Warp 물리를 수행하고, rsl_rl의 PPO가 정책을 학습한다. MicroDuck task나 정책을 불러와 사용하지 않는다.
 
@@ -12,7 +12,7 @@ cd /home/fcsl/Secret_project
 /home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.train --num-envs 16 --iterations 3 --log-dir /tmp/microdog_standing_smoke
 ```
 
-첫 명령이 통과한 뒤 두 번째 명령을 실행한다. 기본 학습은 16개 환경, 16 step rollout, 3 iteration이다. checkpoint, loss와 TensorBoard 기록은 지정 경로에만 저장하고 외부 서비스에 업로드하지 않는다. 최초 실행에는 Warp kernel compile 시간이 추가될 수 있다.
+첫 명령이 통과한 뒤 두 번째 명령을 실행한다. 기본 학습은 Stage 0의 16개 환경, 16 step rollout, 3 iteration이다. checkpoint, loss와 TensorBoard 기록은 지정 경로에만 저장하고 외부 서비스에 업로드하지 않는다. 최초 실행에는 Warp kernel compile 시간이 추가될 수 있다.
 
 ## 제어와 관측
 
@@ -50,7 +50,7 @@ actor에는 세계 위치, 절대 quaternion, 접촉력, base 높이를 넣지 �
 
 | 항목 | 수식 | weight |
 |---|---|---:|
-| 기립 | `exp(-sum(g_xy²)/0.2²) * clamp(-g_z,0,1)` | +1.5 |
+| 기립 | `exp(-sum(g_xy²)/0.05²) * clamp(-g_z,0,1)` | +1.5 |
 | 높이 | `exp(-max(abs(z-0.1927)-0.005,0)²/0.02²)` | +0.5 |
 | 관절 자세 | `exp(-mean(dq²)/0.1²)` | +0.2 |
 | 관절 속도 비용 | `mean(v²)` | −0.02 |
@@ -65,8 +65,44 @@ actor에는 세계 위치, 절대 quaternion, 접촉력, base 높이를 넣지 �
 
 종료 환경만 중립 keyframe으로 자동 reset한다. timeout은 실패 종료와 구분해 PPO에 전달한다. 종료 직전 관측과 진단은 `extras`에 보존하고 반환 관측은 reset 후 상태다. 잘못된 action shape이나 NaN action은 입력 오류로 처리한다.
 
-다리 actuator 토크와 포화, 자기접촉·비정상 지면 접촉은 physics substep마다 검사한다. 발 접지는 제어 step 종료 상태에서 기록한다. 외란·reset noise·domain randomization은 비활성 상태다.
+다리 actuator 토크와 포화, 자기접촉·비정상 지면 접촉은 physics substep마다 검사한다. 발 접지는 제어 step 종료 상태에서 기록한다. Stage 0에서는 외란과 초기 오차가 없으며 Stage 1 이상에서는 아래 초기 오차를 적용한다. 질량·마찰 등 물리 계수의 무작위화는 아직 구현하지 않았다.
 
-## 다음 검증
+## 초기 오차와 외력 단계
 
-현재 구조는 기립 유지와 학습 연결 확인용이다. 외란 복원 능력이나 보행 성능을 검증한 정책이 아니다. 다음 단계에서 작은 초기 자세 변화와 외란 평가를 추가하고, 이후 마찰·질량·actuator strength·damping·지연·관측 noise를 순차 검증한다. ONNX 배포·Walking reward·velocity command는 구현하지 않았다.
+`StandingCfg.stage` 또는 학습·평가의 `--stage`로 단계를 명시한다. 자동 승급은 없다.
+
+| 단계 | 초기 자세 및 관절 오차 | 외력 |
+|---|---|---|
+| 0 | 중립 keyframe | 없음 |
+| 1 | roll/pitch ±2°, yaw 0; hip roll ±0.1°, hip pitch/knee ±0.5° | 없음 |
+| 2 | 단계 1과 같음 | 몸통에 x 또는 y 방향 ±1 N, 0.15초 |
+| 3 | 자세와 관절 위치 오차를 단계 1의 1.5배로 확대 | ±2 N, 0.15초; 진단용 |
+
+단계 1 이상에서 관절 속도는 ±0.01 rad/s, 몸통 roll/pitch 각속도는 ±0.02 rad/s다. 몸통 선속도와 yaw 각속도는 0이다. 초기 발 관통을 피하기 위해 가장 낮은 발의 바닥면이 지면에 닿도록 몸통 높이를 보정한다. 물리 모델, 기구학, keyframe 자체는 변경하지 않는다.
+
+외력은 세계 좌표계의 `xfrc_applied`로 몸통 질량중심에 가하며 토크는 0이다. 각 episode의 2~3초 사이에서 시작한다. force 적용 여부는 각 0.002초 substep에서 확인한다. reset 시 남은 외력을 지운다. `push_force`는 물리 시험에서만 크기를 별도로 지정할 수 있다.
+
+물리 sweep에서 1 N은 자기접촉 없이 복구했으나 1.5~2 N에서는 일부 자기접촉이 발생했다. 4 N에서는 넘어짐이 나타났다. 따라서 단계 3은 검증된 안전 학습 단계가 아니다. 단계 1의 성공률 99% 이상, 실패 종료율 1% 이하, 자기접촉 0을 확인한 뒤 단계 2를 선택한다. 단계 3을 학습에 쓰기 전에는 자기접촉 없이 복구 가능한 범위를 다시 검증해야 한다. 단계 2의 16 episode 결과만으로 자동 승급하지 않는다.
+
+초기 오차와 외력 일정은 전용 seeded generator에서 생성한다. 정책 구성으로 바뀌는 전역 난수 상태와 분리한다. 정책 비교는 동일한 seed, 환경 수, 단계, episode 길이를 사용한다. 학습 seed는 42, 기본 평가 seed는 2026이다.
+
+## Pilot 학습과 평가
+
+```bash
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.train --num-envs 64 --iterations 100 --stage 2 --episode-seconds 10 --seed 42 --log-dir /tmp/microdog_standing_pilot
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.evaluate --stage 2 --seed 2026 --output /tmp/standing_zero.json
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.evaluate --stage 2 --seed 2026 --random --output /tmp/standing_random.json
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.evaluate --stage 2 --seed 2026 --checkpoint /tmp/microdog_standing_pilot/checkpoint_100.pt --output /tmp/standing_ppo.json
+```
+
+`checkpoint_0.pt`는 학습 전 모델이며 `checkpoint_25/50/75/100.pt`는 실제 완료된 PPO update 수를 뜻한다. 라이브러리가 생성하는 `model_*.pt`의 0부터 시작하는 iteration 번호와 구분한다. `metrics.json`에는 update마다 평균 step reward, 완료된 episode의 return과 길이, 실패율, 보상 항목, loss, entropy, learning rate, 자기접촉·지면 이상 접촉 수, 포화 표본 수, peak torque를 기록한다. 아직 완료된 episode가 없는 update의 episode 평균은 `null`이다. `environment.json`에는 환경 설정, 모델 hash, Git 기준점과 GPU를 기록한다.
+
+평가는 환경마다 첫 episode만 집계한다. 조기 종료 뒤 자동 reset된 후속 episode를 섞지 않는다. 16개 환경의 10초 episode에서 생존율·실패율·return, 최대/평균 절대 roll/pitch, 높이 오차, 네 발 접지 비율, 포화 비율, 자기접촉과 비정상 지면 접촉, 초기 및 외란 복구 시간을 기록한다. 발 접지는 제어 step 종료 시점, 접촉 사건과 포화는 모든 물리 substep을 검사한다. 접촉 수의 단위는 해당 사건이 발생한 환경별 제어 step이며 독립된 접촉 사건의 개수가 아니다.
+
+복구는 `|roll|, |pitch| < 0.6°`, 높이 오차 <5 mm, 네 발 접지를 0.2초 연속 유지하는 것으로 정의한다. 정상 평형 pitch가 약 0.4°인 점을 고려했다. 외력이 끝난 뒤 처음 성립한 구간의 시작까지를 복구 시간으로 기록한다. 초기 복구도 같은 기준을 쓰며 episode 시작을 기준으로 잰다. 성공률은 생존, 초기 및 외란 복구, 자기접촉·비정상 접촉 없음, actuator 포화 표본 비율 1% 미만을 모두 요구한다. 생존율과 성공률은 다를 수 있다.
+
+## 한계와 다음 검증
+
+현재는 제한된 기립 복구 실험이며 보행 정책이 아니다. 자기접촉은 평가 지표에 포함하지만 실패 종료나 보상에 직접 반영하지 않는다. 따라서 중간 정책에서 접촉이 발견되면 보상만 좋아졌다는 이유로 통과시키지 않는다. 고정된 PD 제어기만으로도 작은 외란에서 빠르게 회복하기 때문에 PPO의 역할을 별도로 증명해야 한다.
+
+0.75초 필터의 90% 응답 시간은 약 1.73초다. 0.15초 외력 동안 목표 변화의 약 18%만 적용되므로 빠른 반응의 한계가 있다. 이번 pilot에서는 action scale과 필터를 바꾸지 않았다. 다음 검증에서는 여러 학습·평가 seed, 접촉 방지 제약, 외란 중 최대 기울기와 회복 지표를 확인한다. 이후 실기 기반 마찰·질량·actuator strength·damping·지연·관측 noise를 검증한다. ONNX 배포, Walking reward, velocity command는 구현하지 않았다.
