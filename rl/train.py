@@ -18,11 +18,14 @@ def main():
     parser.add_argument('--log-dir', type=Path, default=Path('/tmp/microdog_standing_smoke'))
     parser.add_argument('--stage', type=int, default=0)
     parser.add_argument('--episode-seconds', type=float, default=20.)
+    parser.add_argument('--smoothing-tau', type=float, default=.75)
+    parser.add_argument('--v2-stage', choices=['A','B','C','D'])
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     if args.iterations < 1:
         parser.error('iteration은 양수여야 합니다.')
-    env_cfg = StandingCfg(num_envs=args.num_envs, seed=args.seed, stage=args.stage,
+    env_cfg = StandingCfg(num_envs=args.num_envs, seed=args.seed, stage=2 if args.v2_stage else args.stage,
+                          v2_stage=args.v2_stage, smoothing_seconds=args.smoothing_tau,
                           episode_seconds=args.episode_seconds)
     env = StandingEnv(env_cfg)
     cfg = ppo_config()
@@ -33,6 +36,9 @@ def main():
     (args.log_dir / 'environment.json').write_text(json.dumps({
         'config': asdict(env_cfg), 'model_sha256': hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest(),
         'git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+        'reference_calibration': env.reference_calibration,
+        'reference_orientation': env.reference_standing_orientation.cpu().tolist(),
+        'reference_height': env.reference_standing_height,
         'gpu': torch.cuda.get_device_name(env.device)}, indent=2))
     runner = OnPolicyRunner(env, cfg, log_dir=str(args.log_dir), device=env.device)
     initial_state = runner.alg.save()
@@ -53,6 +59,7 @@ def main():
         batch.append(dict(step_reward=float(reward.mean()),
             completed_returns=returns[completed].cpu().tolist(),
             completed_lengths=lengths[completed].cpu().tolist(),
+            self_collision_failures=int(d['reasons']['self_collision'].sum()),
             failures=int(d['terminated'].sum()), completed=int(completed.sum()),
             self_contact_env_steps=int((d['self_contacts']>0).sum()),
             unexpected_contact_env_steps=int(d['reasons']['abnormal_ground'].sum()),
@@ -80,6 +87,7 @@ def main():
             completed_episodes=completed, failures=failures,
             termination_rate=failures/completed if completed else None,
             termination_step_fraction=failures/(len(batch)*env.num_envs),
+            self_collision_failures=sum(row['self_collision_failures'] for row in batch),
             self_contact_env_steps=sum(row['self_contact_env_steps'] for row in batch),
             unexpected_contact_env_steps=sum(row['unexpected_contact_env_steps'] for row in batch),
             saturation_samples=sum(row['saturation_samples'] for row in batch),

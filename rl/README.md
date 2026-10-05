@@ -1,4 +1,4 @@
-# MicroDog 기립 복구 학습 환경
+# MicroDog Standing Task V2
 
 `feature/standing-rl`에서 검증된 `microdog.xml`을 직접 읽는다. XML과 기존 실행 스크립트는 변경하지 않는다. mjlab의 `Simulation`이 MuJoCo Warp 물리를 수행하고, rsl_rl의 PPO가 정책을 학습한다. MicroDuck task나 정책을 불러와 사용하지 않는다.
 
@@ -42,6 +42,8 @@ actor와 critic은 동일한 42차원 관측을 사용한다.
 
 마지막 항목은 필터 상태를 관측 가능하게 만든다. 원래 정책 요청은 `requested_actions`, 적용값은 `previous_actions`, 실제 target은 `joint_targets`에서 추적한다. action 변화 비용은 현재와 직전 step의 실제 적용 action 차이를 사용한다. 필터 적용과 observation 정의를 바꾸면 정책을 다시 검증해야 한다.
 
+모델별 자연 평형에서 `g_ref`와 `z_ref`를 보정한다. 목표 자세는 `StandingCfg.reference_standing_orientation`의 rad 단위 roll/pitch/yaw로, 높이는 `reference_standing_height`로 별도 지정할 수 있다. 미지정 값은 `neutral_standing`을 35초 안정화한 보정 결과에서 가져온다. 파일 내용 hash를 보정 cache의 키에 포함한다. 목표 pitch 수치를 모델 공통 상수로 하드코딩하지 않는다.
+
 actor에는 세계 위치, 절대 quaternion, 접촉력, base 높이를 넣지 않는다. projected gravity는 향후 IMU 자세 추정으로 대체할 수 있지만 센서 추정 오차는 아직 모델링하지 않는다. PPO actor/critic 관측 정규화는 활성화한다.
 
 ## 보상
@@ -50,8 +52,8 @@ actor에는 세계 위치, 절대 quaternion, 접촉력, base 높이를 넣지 �
 
 | 항목 | 수식 | weight |
 |---|---|---:|
-| 기립 | `exp(-sum(g_xy²)/0.05²) * clamp(-g_z,0,1)` | +1.5 |
-| 높이 | `exp(-max(abs(z-0.1927)-0.005,0)²/0.02²)` | +0.5 |
+| 자세 추종 | `exp(-sum((g-g_ref)²)/0.05²) * clamp(dot(g,g_ref),0,1)` | +1.5 |
+| 높이 | `exp(-max(abs(z-z_ref)-0.005,0)²/0.02²)` | +0.5 |
 | 관절 자세 | `exp(-mean(dq²)/0.1²)` | +0.2 |
 | 관절 속도 비용 | `mean(v²)` | −0.02 |
 | action 변화 비용 | `mean(da²)` | −0.01 |
@@ -65,7 +67,7 @@ actor에는 세계 위치, 절대 quaternion, 접촉력, base 높이를 넣지 �
 
 종료 환경만 중립 keyframe으로 자동 reset한다. timeout은 실패 종료와 구분해 PPO에 전달한다. 종료 직전 관측과 진단은 `extras`에 보존하고 반환 관측은 reset 후 상태다. 잘못된 action shape이나 NaN action은 입력 오류로 처리한다.
 
-다리 actuator 토크와 포화, 자기접촉·비정상 지면 접촉은 physics substep마다 검사한다. 발 접지는 제어 step 종료 상태에서 기록한다. Stage 0에서는 외란과 초기 오차가 없으며 Stage 1 이상에서는 아래 초기 오차를 적용한다. 질량·마찰 등 물리 계수의 무작위화는 아직 구현하지 않았다.
+다리 actuator 토크와 포화, 자기접촉·비정상 지면 접촉은 physics substep마다 검사한다. 자기접촉이 발생한 제어 step은 실패 종료하고 timeout과 구분하여 PPO에 전달한다. 바닥·발 접촉은 정상이며 XML에서 제외한 접촉 관계는 그대로 유지한다. 활성화된 비바닥 접촉은 허용하지 않는다. 깊이나 지속 시간 문턱은 두지 않는다. 발 접지는 제어 step 종료 상태에서 기록한다. Stage 0에서는 외란과 초기 오차가 없으며 Stage 1 이상에서는 아래 초기 오차를 적용한다. 질량·마찰 등 물리 계수의 무작위화는 아직 구현하지 않았다.
 
 ## 초기 오차와 외력 단계
 
@@ -99,11 +101,11 @@ actor에는 세계 위치, 절대 quaternion, 접촉력, base 높이를 넣지 �
 
 평가는 환경마다 첫 episode만 집계한다. 조기 종료 뒤 자동 reset된 후속 episode를 섞지 않는다. 16개 환경의 10초 episode에서 생존율·실패율·return, 최대/평균 절대 roll/pitch, 높이 오차, 네 발 접지 비율, 포화 비율, 자기접촉과 비정상 지면 접촉, 초기 및 외란 복구 시간을 기록한다. 발 접지는 제어 step 종료 시점, 접촉 사건과 포화는 모든 물리 substep을 검사한다. 접촉 수의 단위는 해당 사건이 발생한 환경별 제어 step이며 독립된 접촉 사건의 개수가 아니다.
 
-복구는 `|roll|, |pitch| < 0.6°`, 높이 오차 <5 mm, 네 발 접지를 0.2초 연속 유지하는 것으로 정의한다. 정상 평형 pitch가 약 0.4°인 점을 고려했다. 외력이 끝난 뒤 처음 성립한 구간의 시작까지를 복구 시간으로 기록한다. 초기 복구도 같은 기준을 쓰며 episode 시작을 기준으로 잰다. 성공률은 생존, 초기 및 외란 복구, 자기접촉·비정상 접촉 없음, actuator 포화 표본 비율 1% 미만을 모두 요구한다. 생존율과 성공률은 다를 수 있다.
+V2 복구는 `|roll-roll_ref|, |pitch-pitch_ref| < 0.1°`, 보정된 목표 높이 오차 <5 mm, 네 발 접지를 0.2초 연속 유지하는 것으로 정의한다. 목표는 reward와 동일한 보정 자세다. 이 문턱은 시뮬레이션 평가용이며 실기 문턱은 센서 오차를 측정한 뒤 검증해야 한다. 기존 수평 0.6° 기준 복구 시간은 별도 지표로 남긴다. 외력이 끝난 뒤 처음 성립한 구간의 시작까지를 복구 시간으로 기록한다. 초기 복구도 같은 기준을 쓰며 episode 시작을 기준으로 잰다. 성공률은 생존, 초기 및 외란 복구, 자기접촉·비정상 접촉 없음, actuator 포화 표본 비율 1% 미만을 모두 요구한다. 생존율과 성공률은 다를 수 있다.
 
 ## 한계와 다음 검증
 
-현재는 제한된 기립 복구 실험이며 보행 정책이 아니다. 자기접촉은 평가 지표에 포함하지만 실패 종료나 보상에 직접 반영하지 않는다. 따라서 중간 정책에서 접촉이 발견되면 보상만 좋아졌다는 이유로 통과시키지 않는다. 고정된 PD 제어기만으로도 작은 외란에서 빠르게 회복하기 때문에 PPO의 역할을 별도로 증명해야 한다.
+현재는 제한된 기립 복구 실험이며 보행 정책이 아니다. 자기접촉은 V2에서 실패 종료와 평가 지표에 반영한다. 따라서 중간 정책에서 접촉이 발견되면 보상만 좋아졌다는 이유로 통과시키지 않는다. 고정된 PD 제어기만으로도 작은 외란에서 빠르게 회복하기 때문에 PPO의 역할을 별도로 증명해야 한다.
 
 0.75초 필터의 90% 응답 시간은 약 1.73초다. 0.15초 외력 동안 목표 변화의 약 18%만 적용되므로 빠른 반응의 한계가 있다. 이번 pilot에서는 action scale과 필터를 바꾸지 않았다. 다음 검증에서는 여러 학습·평가 seed, 접촉 방지 제약, 외란 중 최대 기울기와 회복 지표를 확인한다. 이후 실기 기반 마찰·질량·actuator strength·damping·지연·관측 noise를 검증한다. ONNX 배포, Walking reward, velocity command는 구현하지 않았다.
 
@@ -128,6 +130,40 @@ actor에는 세계 위치, 절대 quaternion, 접촉력, base 높이를 넣지 �
 
 0.5~0.75 N, 0.5~1초 외력에서 자기접촉·포화·접지 손실 없이 능동 제어의 개선을 확인했다. 0.75초 필터에서도 최대·누적 오차는 줄었으나 외력이 끝난 뒤 복구가 늦어질 수 있었다. 0.15초 필터는 진단에서 최대·누적 오차와 복구 시간을 함께 개선했다. 기본 필터는 여전히 0.75초다. 다음 단계에서 안전성 검증을 유지하며 별도 설정으로 비교하는 것을 추천한다.
 
-기존 PPO의 자기접촉은 수십 마이크로미터 깊이로 여러 물리 step 동안 지속됐으며 단순한 한 step 수치 접촉으로 볼 근거가 없다. CAD 확인 전에는 관통 발생 즉시 실패 종료하는 방식을 우선 추천한다. 접촉 깊이와 시간 문턱을 만들어 알려진 간섭을 허용하지 않는다. 이번 진단에서는 RL 종료 규칙을 확정 변경하지 않았다.
+기존 PPO의 자기접촉은 수십 마이크로미터 깊이로 여러 물리 step 동안 지속됐으며 단순한 한 step 수치 접촉으로 볼 근거가 없다. CAD 확인 전에는 관통 발생 즉시 실패 종료하는 방식을 우선 추천한다. 접촉 깊이와 시간 문턱을 만들어 알려진 간섭을 허용하지 않는다. 진단 이후 Standing V2에서 관통을 포함한 활성 자기접촉의 실패 종료를 구현했다.
 
 기립 복구의 다음 목표는 자연 평형을 기준으로 외란 중 오차와 복구를 줄이는 것이다. 0° 몸통 수평 유지가 필요하면 별도 목표로 평가한다. actor의 42차원 관측은 이번 자세 제어에 필요한 정보를 제공했으나 제자리 복귀를 보장하지 않는다. 위치 복귀를 목표로 추가하기 전에는 실기에서 이용 가능한 속도·위치 추정 방법을 먼저 정해야 한다.
+
+## Standing V2 실행과 평가 범위
+
+V2의 주 목표는 자연 평형 대비 자세 오차를 줄이는 것이다. yaw 추종은 추가하지 않는다. projected gravity는 roll/pitch 목표만 반영한다. 기존 action 12차원과 observation 42차원, 네트워크 및 PPO hyperparameter는 유지한다. `--smoothing-tau`로 0.75/0.30/0.15/0.05초를 선택할 수 있으며 기본은 0.75초다.
+
+| V2 단계 | 외력 크기 | 지속 시간 |
+|---|---:|---:|
+| A | 0.5 N | 0.5초 |
+| B | 0.5 N | 1.0초 |
+| C | 0.75 N | 0.5초 |
+| D | 0.75 N | 1.0초 |
+
+학습에서는 episode마다 네 방향 중 하나를 무작위로 선택한다. 평가는 16개 환경에서 +x/−x/+y/−y를 각각 4개씩 배정한다. 정책별로 동일한 seed와 초기 오차, 외력 시작 시점을 사용한다. reset 범위는 기존 Stage 1을 유지한다.
+
+```bash
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.train --num-envs 64 --iterations 100 --v2-stage A --smoothing-tau .15 --episode-seconds 10 --seed 314 --log-dir /tmp/microdog_v2/ppo
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.evaluate --v2-stage A --smoothing-tau .15 --seed 2026 --output /tmp/v2_zero.json
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.evaluate --v2-stage A --smoothing-tau .15 --seed 2026 --scripted --output /tmp/v2_scripted.json
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.evaluate --v2-stage A --smoothing-tau .15 --seed 2026 --checkpoint /tmp/microdog_v2/ppo/checkpoint_100.pt --output /tmp/v2_ppo.json
+```
+
+학습 전에 zero-action과 scripted 기준 제어기로 초기 오차와 각 외력을 결합한 안전성을 검증한다. scripted 제어기는 학습 action이나 보상에 사용하지 않는다. 실패 종료 이유는 `fall`, `self_collision`, `invalid_state`, `abnormal_ground_contact`, `timeout`으로 기록한다.
+
+핵심 자세 오차는 목표 대비 roll/pitch 오차 벡터의 크기이며 단위는 도다. `peak_orientation_error`는 외력 시작 이후 episode가 끝날 때까지의 최대 오차를 환경별로 계산한 평균이다. `integrated_orientation_error`는 같은 구간의 오차 적분으로 단위는 도·초다. 외력 적용 중의 최대·적분 오차와 전체 episode 지표도 별도로 저장한다. 초기 기울기가 외란 응답 비교를 지배하지 않도록 구간을 구분한다. 생존·접촉 조건이 나빠진 정책은 오차나 return만으로 개선 판정을 하지 않는다.
+
+평가 seed는 2026/2027/2028, 학습 seed는 314다. 각 정책과 checkpoint를 48 episode로 비교한다. 모델·standalone 파일은 수정하지 않는다. 학습 결과가 개선되지 않으면 iteration을 자동으로 늘리지 않는다.
+
+### V2 초기 실험 결과
+
+Stage A에서 64개 환경, 100 update, rollout 16, 학습 seed 314를 사용했다. 네트워크와 PPO 설정은 기존과 같았다. 초기 오차와 네 단계 외력을 결합한 zero-action/scripted 안전성 평가 384 episode를 먼저 통과했다. 기준 제어기는 PPO 학습에 사용하지 않았다.
+
+평가 seed 2026/2027/2028의 48 episode 평균에서 zero-action의 최대·누적 자세 오차는 0.31859°/0.19566 도·초, scripted 기준은 0.14598°/0.07068 도·초였다. 반면 최종 PPO는 0.76452°/5.09488 도·초로 악화됐다. 생존율은 100%지만 0.1° 복구 기준의 성공률은 0%였다. 이 정책을 기립 복구 성공 정책으로 판정하지 않는다.
+
+학습 중 자기접촉 3건은 모두 실패 종료로 처리했고, 평가 checkpoint들의 자기접촉과 포화는 0이었다. scripted 제어기의 return 개선은 약 0.03%에 불과했다. 목표의 일치만으로 정책 학습이 보장되지 않으며, 다음 단계에서는 보상 대비와 정책 update·정규화·기여도 할당을 점검해야 한다. 성능 악화의 원인을 하나로 확정하지 않는다. 이번 실험 뒤 추가 iteration이나 재학습은 수행하지 않았다.

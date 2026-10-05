@@ -10,6 +10,7 @@ from rsl_rl.env import VecEnv
 from mjlab.sim.sim import Simulation, SimulationCfg, MujocoCfg
 from .config import StandingCfg, MODEL_PATH, LEG_JOINT_NAMES, ACTION_SCALE
 from .rewards import standing_rewards
+from .reference import calibrate_reference, gravity_from_rpy
 
 
 @wp.kernel
@@ -75,6 +76,14 @@ class StandingEnv(VecEnv):
         tensor = lambda x, dtype=torch.float32: torch.as_tensor(np.array(x, copy=True), dtype=dtype, device=self.device)
         self.qpos_ids = tensor(m.jnt_qposadr[m.actuator_trnid[:12, 0]], torch.long)
         self.qvel_ids = tensor(m.jnt_dofadr[m.actuator_trnid[:12, 0]], torch.long)
+        self.reference_calibration = calibrate_reference()
+        reference_rpy = cfg.reference_standing_orientation
+        if reference_rpy is None:
+            reference_rpy = self.reference_calibration['orientation']
+        self.reference_standing_orientation = tensor(reference_rpy)
+        self.reference_standing_height = (self.reference_calibration['height']
+            if cfg.reference_standing_height is None else cfg.reference_standing_height)
+        self.reference_gravity = tensor(gravity_from_rpy(reference_rpy))
         self.initial_qpos = tensor(m.key_qpos[key])
         self.initial_ctrl = tensor(m.key_ctrl[key])
         self.default_joint_position = self.initial_ctrl[:12]
@@ -135,11 +144,12 @@ class StandingEnv(VecEnv):
                 self.qvel[ids[:, None], self.qvel_ids] = uniform((count, 12)) * .01
                 self.qvel[ids, 3:5] = uniform((count, 2)) * .02
             self.push_start[ids] = 2. + (uniform((count,)) + 1.) / 2.
-            magnitude = self.cfg.push_force
-            if magnitude is None:
-                magnitude = (0., 0., 1., 2.)[self.cfg.stage]
+            magnitude = self.cfg.disturbance_force
             axis = torch.randint(0, 2, (count,), generator=self._rng, device=self.device)
             sign = torch.randint(0, 2, (count,), generator=self._rng, device=self.device) * 2 - 1
+            if self.cfg.balanced_push_directions:
+                axis = (ids // 2) % 2
+                sign = torch.where(ids % 2 == 0, 1, -1)
             self.push_vector[ids] = 0
             self.push_vector[ids, axis] = float(magnitude) * sign
             self.ctrl[ids] = self.initial_ctrl
@@ -213,7 +223,7 @@ class StandingEnv(VecEnv):
             push_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             for substep in range(self.cfg.decimation):
                 time = self.episode_length_buf * self.cfg.step_dt + substep * self.cfg.timestep
-                active = (time >= self.push_start) & (time < self.push_start + self.cfg.push_seconds)
+                active = (time >= self.push_start) & (time < self.push_start + self.cfg.disturbance_seconds)
                 self.external_force.zero_()
                 self.external_force[:, self.base_id, :3] = self.push_vector * active[:, None]
                 push_active |= active & (self.push_vector.norm(dim=-1) > 0)
@@ -234,11 +244,13 @@ class StandingEnv(VecEnv):
         abnormal = abnormal | self._events[:, 1].bool()
         reward, terms = standing_rewards(gravity, self.qpos[:, 2],
             self.qpos[:, self.qpos_ids] - self.default_joint_position,
-            self.qvel[:, self.qvel_ids], applied_delta, self.torque[:, :12])
+            self.qvel[:, self.qvel_ids], applied_delta, self.torque[:, :12],
+            reference_gravity=self.reference_gravity, reference_height=self.reference_standing_height)
         reward = torch.where(finite, reward * self.cfg.step_dt, torch.zeros_like(reward))
         reasons = dict(invalid=~finite, low_height=self.qpos[:, 2] < self.cfg.min_height,
             tilt=gravity[:, 2] > -math.cos(math.radians(self.cfg.max_tilt_degrees)),
-            abnormal_ground=abnormal)
+            abnormal_ground=abnormal,
+            self_collision=(self_contacts > 0) if self.cfg.self_collision_failure else torch.zeros_like(finite))
         terminated = torch.stack(list(reasons.values())).any(0)
         timeout = self.episode_length_buf >= self.max_episode_length
         done = terminated | timeout
@@ -252,7 +264,11 @@ class StandingEnv(VecEnv):
             roll=torch.atan2(-gravity[:, 1], -gravity[:, 2]),
             pitch=torch.asin(gravity[:, 0].clamp(-1, 1)),
             terminated=terminated, reward_terms={k: v.clone() for k, v in terms.items()})
-        extras = {'time_outs': timeout & ~terminated, 'diagnostics': diagnostics,
+        termination_reasons = dict(fall=reasons['low_height'] | reasons['tilt'],
+            self_collision=reasons['self_collision'], invalid_state=reasons['invalid'],
+            abnormal_ground_contact=reasons['abnormal_ground'], timeout=timeout & ~terminated)
+        diagnostics['termination_reasons'] = termination_reasons
+        extras = {'time_outs': timeout & ~terminated, 'termination_reasons': termination_reasons, 'diagnostics': diagnostics,
                   'terminal_observation': terminal_obs,
                   'log': {**{f'Reward/{k}': torch.nan_to_num(v).mean() for k, v in terms.items()},
                           'Task/termination_rate': terminated.float().mean(),
