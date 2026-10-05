@@ -1,6 +1,5 @@
 from pathlib import Path
 import time
-import numpy as np
 import mujoco
 import mujoco.viewer
 
@@ -8,16 +7,14 @@ MODEL = Path(__file__).with_name("microdog.xml")
 model = mujoco.MjModel.from_xml_path(str(MODEL))
 data = mujoco.MjData(model)
 
-targets_deg = np.array([
-     8, -18, 38,   # FL
-    -8, -18, 38,   # FR
-     8,  18, 38,   # RL
-    -8,  18, 38,   # RR
-     0,   0,  0,   # head
-     0, -10        # tail
-], dtype=float)
-
-data.ctrl[:] = np.deg2rad(targets_deg)
+# XML에 정의한 기립 자세와 같은 목표각으로 시작한다.
+standing_id = mujoco.mj_name2id(
+    model, mujoco.mjtObj.mjOBJ_KEY, "neutral_standing"
+)
+if standing_id < 0:
+    raise ValueError("XML에 neutral_standing keyframe이 없습니다.")
+mujoco.mj_resetDataKeyframe(model, data, standing_id)
+mujoco.mj_forward(model, data)
 
 with mujoco.viewer.launch_passive(model, data) as viewer:
     viewer.cam.lookat[:] = [0.0, 0.0, 0.12]

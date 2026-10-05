@@ -29,7 +29,7 @@
     <geom name="floor" type="plane" size="2 2 0.05" material="ground_mat"/>
 
     <!-- ~25 cm class MicroDog preview body -->
-    <body name="base" pos="0 0 0.215">
+    <body name="base" pos="0 0 0.19469996363678">
       <freejoint/>
       <geom contype="2" conaffinity="15" name="torso" type="box" size="0.105 0.055 0.032"
             mass="0.42" material="body_mat"/>
@@ -173,4 +173,24 @@
     <position joint="tail_yaw_joint"   ctrlrange="-55 55"/>
     <position joint="tail_pitch_joint" ctrlrange="-35 35"/>
   </actuator>
+
+  <!-- 중립 기립 자세: 다리 roll=0°, pitch=-15.414921337176°, knee=30°.
+       keyframe의 관절 위치와 제어값은 rad 단위이다.
+       qpos 순서: base, head, tail, FL, FR, RL, RR.
+       ctrl 순서: FL, FR, RL, RR, head, tail.
+       발 바닥은 접촉 검출을 위해 지면보다 1 μm 낮게 설정한다. -->
+  <keyframe>
+    <key name="neutral_standing"
+         qpos="0 0 0.19469996363678 1 0 0 0
+               0 0 0 0 0
+               0 -0.269041131269648 0.523598775598299
+               0 -0.269041131269648 0.523598775598299
+               0 -0.269041131269648 0.523598775598299
+               0 -0.269041131269648 0.523598775598299"
+         ctrl="0 -0.269041131269648 0.523598775598299
+               0 -0.269041131269648 0.523598775598299
+               0 -0.269041131269648 0.523598775598299
+               0 -0.269041131269648 0.523598775598299
+               0 0 0 0 0"/>
+  </keyframe>
 </mujoco>
