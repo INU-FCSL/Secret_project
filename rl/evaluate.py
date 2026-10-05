@@ -7,6 +7,7 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 from .config import StandingCfg, ppo_config
 from .env import StandingEnv
+from .normalization import restore
 
 
 class ScriptedController:
@@ -35,7 +36,7 @@ class ScriptedController:
 
 
 @torch.inference_mode()
-def evaluate(cfg, checkpoint=None, random=False, scripted=False):
+def evaluate(cfg, checkpoint=None, random=False, scripted=False, *, step_callback=None):
     if sum((checkpoint is not None,random,scripted)) > 1:
         raise ValueError('평가 정책은 하나만 선택해야 합니다.')
     env = StandingEnv(cfg)
@@ -43,7 +44,8 @@ def evaluate(cfg, checkpoint=None, random=False, scripted=False):
         policy = None
         if checkpoint is not None:
             runner = OnPolicyRunner(env, ppo_config(), log_dir=None, device=cfg.device)
-            runner.load(str(checkpoint), load_cfg={'actor': True, 'critic': True})
+            infos = runner.load(str(checkpoint), load_cfg={'actor': True, 'critic': True})
+            restore(runner.alg, infos)
             policy = runner.get_inference_policy(device=cfg.device)
         elif scripted:
             policy = ScriptedController(env)
@@ -72,6 +74,7 @@ def evaluate(cfg, checkpoint=None, random=False, scripted=False):
         height_reference = env.reference_standing_height
         reasons = {name:zero() for name in ('fall','self_collision','invalid_state','abnormal_ground_contact','timeout')}
         for step in range(env.max_episode_length):
+            evaluation_observation = obs
             if policy is not None:
                 action = policy(obs)
             elif random:
@@ -80,6 +83,8 @@ def evaluate(cfg, checkpoint=None, random=False, scripted=False):
                 action = torch.zeros((n,12),device=device)
             obs,reward,done,extras = env.step(action)
             d = extras['diagnostics']
+            if step_callback is not None:
+                step_callback(env,evaluation_observation,action,reward,done,extras,alive.clone(),(step+1)*cfg.step_dt)
             rpy = torch.stack((d['roll'],d['pitch']),-1)
             error = torch.rad2deg(rpy-reference)
             tilt = torch.nan_to_num(error.norm(dim=-1),nan=180.,posinf=180.)

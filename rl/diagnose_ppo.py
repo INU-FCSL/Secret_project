@@ -16,6 +16,7 @@ from .env import StandingEnv
 from .evaluate import ScriptedController
 from .reference import gravity_from_rpy, calibrate_reference
 from .rewards import standing_rewards
+from .normalization import restore
 
 TERMS = ('upright', 'height', 'pose', 'joint_velocity', 'action_rate', 'effort')
 GROUPS = {'gravity': (0, 3), 'angular_velocity': (3, 6), 'joint_position': (6, 18),
@@ -43,8 +44,9 @@ def cfg(seed=2026, num_envs=16):
 
 def load_runner(env, directory, iteration):
     runner = OnPolicyRunner(env, ppo_config(), device=env.device)
-    runner.load(str(directory / f'checkpoint_{iteration}.pt'),
+    infos = runner.load(str(directory / f'checkpoint_{iteration}.pt'),
                 load_cfg={'actor': True, 'critic': True, 'optimizer': True})
+    restore(runner.alg, infos)
     runner.alg.actor.eval()
     runner.alg.critic.eval()
     return runner
@@ -189,7 +191,7 @@ def sensitivity(output):
     save(output/'sensitivity.json', rows)
 
 
-def instrument_update(alg):
+def instrument_update(alg, *, update_fn=None):
     """기존 갱신 함수를 유지하며 입출력과 clipping 전 기울기를 관측한다."""
     original_generator = alg.storage.mini_batch_generator
     original_log_prob = alg.actor.get_output_log_prob
@@ -219,7 +221,7 @@ def instrument_update(alg):
     alg.actor.get_output_log_prob = log_prob
     torch.nn.utils.clip_grad_norm_ = clip
     try:
-        loss = alg.update()
+        loss = (alg.update if update_fn is None else update_fn)()
     finally:
         alg.storage.mini_batch_generator = original_generator
         alg.actor.get_output_log_prob = original_log_prob

@@ -23,10 +23,13 @@ class PPODiagnosticsTests(unittest.TestCase):
                     alg.process_env_step(obs,reward,done,extras)
                 alg.compute_returns(obs)
             twin=copy.deepcopy(alg)
+            native_update=twin.update
+            # 학습 진입점의 wrapper에서도 원래 update를 직접 계측해야 한다.
+            twin.update=lambda:instrument_update(twin,update_fn=native_update)
             torch.manual_seed(7654)
             expected=alg.update()
             torch.manual_seed(7654)
-            measured=instrument_update(twin)
+            measured=twin.update()
             for key in expected:
                 self.assertEqual(expected[key],measured['loss'][key])
             for model_a,model_b in ((alg.actor,twin.actor),(alg.critic,twin.critic)):

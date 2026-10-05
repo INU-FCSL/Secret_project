@@ -177,3 +177,16 @@ Stage A에서 64개 환경, 100 update, rollout 16, 학습 seed 314를 사용했
 ```
 
 `all`은 독립 checkpoint 복사본의 PPO 갱신 총 10회와 임시 지도 회귀를 포함한다. `--part`로 개별 진단을 선택할 수 있다. 원시 배열·임시 회귀망·JSON은 지정한 output에 저장하고 같은 경로의 이전 진단 결과는 덮어쓴다. 모델, 원본 checkpoint, production 정책은 수정하지 않는다. 상세한 측정값·한계·V3 최소 변경안은 [PPO 진단 보고서](PPO_DIAGNOSTICS.md)에 정리했다.
+
+## Standing V3-A: 관측 정규화 준비 후 고정
+
+기본 `running` 경로는 V1/V2의 동작을 유지한다. `--normalization warmup-frozen`을 선택하면 초기 normalizer를 고정한 확률정책으로 실제 관측을 수집하고, 전체 자료의 평균·모집단 분산을 두 normalizer에 한 번 적용한다. 이후 rsl_rl의 `until=count` 제한으로 학습 모드에서도 통계 갱신을 차단한다. `eps=0.01`과 기존 checkpoint tensor 형식은 유지한다. 고정 모드는 `infos.normalization`에 저장하며 평가 및 진단 loader가 이를 복원한다.
+
+```bash
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.train --num-envs 64 --iterations 100 --v2-stage A --smoothing-tau .15 --episode-seconds 10 --seed 2718 --normalization warmup-frozen --warmup-steps 500 --warmup-seed 12718 --log-dir /tmp/microdog_v3a/ppo
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.compare_standing --v2 /tmp/microdog_v2/ppo --v3 /tmp/microdog_v3a/ppo --output /tmp/microdog_v3a/evaluation
+```
+
+통계 수집 중 가중치·통계 불변, 반복 관측 일치, 실제 rollout의 갱신 전 KL을 검사한 후에만 PPO 학습한다. 모든 학습 갱신에서 통계와 갱신 전 KL을 다시 확인한다. 전체 통계를 float64로 계산하고 저장 buffer 형식으로 변환하여 작은 중력 분산의 소실을 방지한다. 보상·action·관측 정의·필터·외란·PPO hyperparameter는 유지하며 seed만 이번 실험의 명시값으로 설정한다.
+
+100회 실험은 갱신 전 KL 문제를 제거했지만 최종 정책의 zero 대비 복구 개선을 달성하지 못했다. 추가 iteration은 실행하지 않았다. 상세 결과와 다음 비교 후보는 [Standing V3-A 보고서](STANDING_V3A.md)에 기록했다.
