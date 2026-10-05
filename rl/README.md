@@ -167,3 +167,13 @@ Stage A에서 64개 환경, 100 update, rollout 16, 학습 seed 314를 사용했
 평가 seed 2026/2027/2028의 48 episode 평균에서 zero-action의 최대·누적 자세 오차는 0.31859°/0.19566 도·초, scripted 기준은 0.14598°/0.07068 도·초였다. 반면 최종 PPO는 0.76452°/5.09488 도·초로 악화됐다. 생존율은 100%지만 0.1° 복구 기준의 성공률은 0%였다. 이 정책을 기립 복구 성공 정책으로 판정하지 않는다.
 
 학습 중 자기접촉 3건은 모두 실패 종료로 처리했고, 평가 checkpoint들의 자기접촉과 포화는 0이었다. scripted 제어기의 return 개선은 약 0.03%에 불과했다. 목표의 일치만으로 정책 학습이 보장되지 않으며, 다음 단계에서는 보상 대비와 정책 update·정규화·기여도 할당을 점검해야 한다. 성능 악화의 원인을 하나로 확정하지 않는다. 이번 실험 뒤 추가 iteration이나 재학습은 수행하지 않았다.
+
+## PPO 학습 신호 진단
+
+동결된 V2 checkpoint의 보상·행동·관측 정규화, 소수 갱신의 실제 advantage·KL·clipping·gradient, 동일 상태의 유한 시간 보상, 임시 지도 회귀를 계측한다. production 보상과 PPO 설정은 변경하지 않는다. 진단은 새 100회 PPO 학습을 실행하지 않으며 기존 checkpoint를 덮어쓰지 않는다.
+
+```bash
+/home/fcsl/robot_ws/mujoco/microduck_rl/.venv/bin/python -m rl.diagnose_ppo --checkpoints /tmp/microdog_v2/ppo --output /tmp/microdog_ppo_diagnostics --part all
+```
+
+`all`은 독립 checkpoint 복사본의 PPO 갱신 총 10회와 임시 지도 회귀를 포함한다. `--part`로 개별 진단을 선택할 수 있다. 원시 배열·임시 회귀망·JSON은 지정한 output에 저장하고 같은 경로의 이전 진단 결과는 덮어쓴다. 모델, 원본 checkpoint, production 정책은 수정하지 않는다. 상세한 측정값·한계·V3 최소 변경안은 [PPO 진단 보고서](PPO_DIAGNOSTICS.md)에 정리했다.
