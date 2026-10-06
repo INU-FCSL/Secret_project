@@ -34,6 +34,7 @@ class StandingCfg:
     self_collision_failure: bool = True
     recovery_degrees: float = .1
     orientation_reward_scale: float = .05
+    pose_reward_weight: float = REWARD_WEIGHTS['pose']
     action_mapping: str = 'clip'
     previous_action_normalization: str = 'running'
     action_basis: str = 'joint'
@@ -60,6 +61,8 @@ class StandingCfg:
             raise ValueError('복구 각도 문턱은 양수여야 합니다.')
         if not math.isfinite(self.orientation_reward_scale) or self.orientation_reward_scale <= 0:
             raise ValueError('자세 보상 scale은 유한한 양수여야 합니다.')
+        if not math.isfinite(self.pose_reward_weight) or self.pose_reward_weight < 0:
+            raise ValueError('pose 보상 weight는 유한한 비음수여야 합니다.')
         if self.stage not in (0, 1, 2, 3) or self.push_seconds <= 0 or (self.push_force is not None and self.push_force < 0):
             raise ValueError('단계는 0~3, 외력은 음수가 아니어야 합니다.')
         if self.num_envs < 1 or self.decimation < 1 or self.episode_seconds <= 0:

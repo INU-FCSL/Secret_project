@@ -48,7 +48,7 @@ def classify(candidate,parent,zero,version='v3'):
     bias=float(np.abs(candidate['actions']['applied']['mean']).mean()) if 'applied' in candidate['actions'] else None
     old_bias=float(np.abs(parent['actions']['applied']['mean']).mean()) if 'applied' in parent['actions'] else None
     bias_improvement=bias is not None and old_bias is not None and bias<old_bias-1e-4
-    if version in ('v5','v6'):
+    if version in ('v5','v6','v7'):
         distribution=candidate['policy_probe']['distribution']
         bias=float(np.abs(distribution['latent_mean']['mean']).mean())
         old_distribution=parent.get('policy_probe',{}).get('distribution')
@@ -64,12 +64,12 @@ def classify(candidate,parent,zero,version='v3'):
     collapsed=correct_feedback(parent) and not correct_feedback(candidate)
     severe_boundary=boundary>.9 and boundary>old_boundary+.15
     input_ok=True
-    if version in ('v4','v5','v6'):
+    if version in ('v4','v5','v6','v7'):
         previous=candidate['policy_probe']['observations']['previous_action']
         input_ok=(max(previous['normalized']['max'])<=1.000001 and min(previous['normalized']['min'])>=-1.000001)
     success=success and input_ok
     partial=(safety and input_ok and peak_reduction>=.15 and integrated_reduction>=.15 and
-        (feedback or boundary_improvement or recovery or (bias_improvement if version in ('v4','v5','v6') else aligned)) and not collapsed and not severe_boundary)
+        (feedback or boundary_improvement or recovery or (bias_improvement if version in ('v4','v5','v6','v7') else aligned)) and not collapsed and not severe_boundary)
     status='SUCCESS' if success else ('PARTIAL' if partial else 'FAIL')
     return dict(status=status,safe=safety,per_seed_zero_improved=seed_improved,
         peak_reduction=peak_reduction,integrated_reduction=integrated_reduction,
@@ -78,12 +78,14 @@ def classify(candidate,parent,zero,version='v3'):
         persistent_bias_improved=bias_improvement,
         mean_absolute_applied_bias=(float(np.abs(candidate['actions']['applied']['mean']).mean())
             if 'applied' in candidate['actions'] else None),
-        mean_absolute_latent_bias=bias if version in ('v5','v6') else None,semantic_input_ok=input_ok,
+        mean_absolute_latent_bias=bias if version in ('v5','v6','v7') else None,semantic_input_ok=input_ok,
         thresholds=dict(partial_reduction=.15,saturation_fraction=.01,severe_boundary=.9))
 
 
-def common_return(summary,scale):
-    if summary['profile']['orientation_reward_scale']==scale:
+def common_return(summary,scale,pose_weight=None):
+    from .config import REWARD_WEIGHTS
+    old_pose=summary['profile'].get('pose_reward_weight',REWARD_WEIGHTS['pose'])
+    if summary['profile']['orientation_reward_scale']==scale and (pose_weight is None or pose_weight==old_pose):
         return summary['aggregate']['mean_return']
     with np.load(summary['trace']) as data:
         rpy=np.deg2rad(data['error'])+np.array(summary['per_seed'][0]['reference_orientation'][:2])
@@ -92,7 +94,12 @@ def common_return(summary,scale):
         ref=np.array(summary['per_seed'][0]['reference_orientation'][:2]);r,p=ref
         gref=np.array([np.sin(p),-np.sin(r)*np.cos(p),-np.cos(r)*np.cos(p)])
         orientation=.03*np.exp(-np.sum((gravity-gref)**2,-1)/scale**2)*np.clip((gravity*gref).sum(-1),0,1)
-        return float(((data['reward']-data['terms'][...,0]+orientation)*data['valid']).sum(0).mean())
+        reward=(data['reward'].astype(float) if summary['profile']['orientation_reward_scale']==scale
+            else data['reward'].astype(float)-data['terms'][...,0]+orientation)
+        if pose_weight is not None and pose_weight!=old_pose:
+            if old_pose==0:raise ValueError('pose weight0의 trace에서 원시 pose score를 복원할 수 없습니다.')
+            reward+=(pose_weight/old_pose-1)*data['terms'][...,2]
+        return float((reward*data['valid']).sum(0).mean())
 
 
 def measure(cfg,output,label,checkpoint=None):
@@ -109,7 +116,8 @@ def measure(cfg,output,label,checkpoint=None):
     path=output/f'{label}.npz';np.savez_compressed(path,**data)
     summary=dict(per_seed=rows,aggregate=aggregate(rows),actions=action_summary(data,cfg.action_mapping),trace=str(path),
         profile=dict(action_mapping=actual_cfg.action_mapping,orientation_reward_scale=actual_cfg.orientation_reward_scale,
-            action_basis=actual_cfg.action_basis,previous_action_normalization=actual_cfg.previous_action_normalization))
+            pose_reward_weight=actual_cfg.pose_reward_weight,action_basis=actual_cfg.action_basis,
+            previous_action_normalization=actual_cfg.previous_action_normalization))
     if checkpoint:
         summary['checkpoint']=str(checkpoint)
         summary['policy_probe']=policy_probe(checkpoint,data,cfg.action_mapping)
@@ -140,8 +148,8 @@ def evaluate_candidate(directory,output,name,checkpoints,parent_path=None,cfg=No
         summary=measure(cfg,output,f'checkpoint_{iteration}',directory/f'checkpoint_{iteration}.pt')
         if parent:
             reference=parent['checkpoints'].get(key,parent['best'])
-            summary['common_parent_return']=common_return(reference,cfg.orientation_reward_scale)
-            summary['classification']=classify(summary,reference,result['baselines']['zero'],name[:2] if name.startswith(('v4','v5','v6')) else 'v3')
+            summary['common_parent_return']=common_return(reference,cfg.orientation_reward_scale,cfg.pose_reward_weight)
+            summary['classification']=classify(summary,reference,result['baselines']['zero'],name[:2] if name.startswith(('v4','v5','v6','v7')) else 'v3')
         result['checkpoints'][key]=summary;save(path,result)
     trained=[(int(i),row) for i,row in result['checkpoints'].items() if int(i)>0 and safe(row)]
     successes=[(i,row) for i,row in trained if parent and row['classification']['status']=='SUCCESS']
@@ -160,9 +168,9 @@ def evaluate_candidate(directory,output,name,checkpoints,parent_path=None,cfg=No
     result.update(best_checkpoint=best_iteration if choices else None,best_eligible=bool(choices),
                   diagnostic_checkpoint=best_iteration,best=best,parent=str(parent_path) if parent_path else None)
     if parent:
-        reference=parent['checkpoints'].get(str(best_iteration),parent['best']) if name.startswith(('v4','v5','v6')) else parent['best']
-        best['common_parent_return']=common_return(reference,cfg.orientation_reward_scale)
-        decision=classify(best,reference,result['baselines']['zero'],name[:2] if name.startswith(('v4','v5','v6')) else 'v3')
+        reference=parent['checkpoints'].get(str(best_iteration),parent['best']) if name.startswith(('v4','v5','v6','v7')) else parent['best']
+        best['common_parent_return']=common_return(reference,cfg.orientation_reward_scale,cfg.pose_reward_weight)
+        decision=classify(best,reference,result['baselines']['zero'],name[:2] if name.startswith(('v4','v5','v6','v7')) else 'v3')
         result['decision']=decision
         save(output/'decision.json',decision)
     save(path,result)

@@ -238,4 +238,20 @@ V5-A25는 V4-B25 대비 최대·누적 오차를 12.65%/17.53% 개선했지만 �
 
 `rl.imitation_diagnostic`는 seed로 분리한 scripted 자료에서 같은 42→64→64→2 actor의 `tanh(mu)`를 사전학습하고, 초기 critic·고정 정규화로 PPO를 5회만 갱신한다. 48 episode 평가에서 imitation과 PPO 1~5 모두 세 seed의 zero 대비 SUCCESS 기준을 충족했다. 그러나 5회 동안 integrated 오차는 약85% 증가했다. SUCCESS 이후 추가 학습·state-dependent std 실험은 중단했다. bootstrap 수정만 적용한 새 정책 V6-Fix25는 실패했다.
 
-전체52개 테스트,18개 checkpoint 복원,12개 동일 조건 평가 trace와 CPU 물리 회귀를 확인했다. V5는 commit·일반 push했고 V6 변경은 unstaged다. 상세 수식·오류·결과·한계·다음 단계는 [Standing V6 보고서](STANDING_V6.md)에 기록했다.
+전체52개 테스트,18개 checkpoint 복원,12개 동일 조건 평가 trace와 CPU 물리 회귀를 확인했다. V6는 `e59a9ff`로 commit·일반 push했다. 상세 수식·오류·결과·한계·다음 단계는 [Standing V6 보고서](STANDING_V6.md)에 기록했다.
+
+## Standing V7: 보상 순위·동일 정책 critic과 좋은 정책 유지
+
+`rl.reward_alignment`는 동일48 episode의 weighted 보상항·물리 순위·pose 재점수화를 대조한다. 실제 기본 pose weight0.2는 유지하고 `--pose-reward-weight`로 후보를 명시한다. 0.1은 저장 trajectory의 물리 순위와 return 정렬을 개선했지만, 좋은 imitation 정책의5회 PPO 악화를 줄이지 못했다.
+
+`rl.policy_credit`는 paired50개 full-physics 상태, 후보9개, 각32 replicate에서 해당 checkpoint의 stochastic continuation을 사용한다. horizon32/64/episode 잔여 구간과 terminal 이후 MC tail을 비교하여 critic·실제 GAE·native PPO update의 credit을 측정한다. 기존 critic의 큰 과소평가와 낮은 advantage 부호·순위 정확도를 확인했다.
+
+`rl.critic_fit`는 고정 actor의1024-step MC target에 현재64×64와128×128 critic을 같은 split으로 fit한다. 큰 network의 개선 근거가 없어 상수 baseline을 교정한64×64 warm-start만 비교했다. `rl.standing_v7`은 pose0.1을 고정한 이 비교에서도 imitation fine-tuning drift가 커짐을 확인했다. `--critic-warm-start`는 critic 초기화만 교체하며 actor·정규화·PPO optimizer를 유지한다.
+
+A/B 모두0~5의48 episode 및 최적 checkpoint를 저장했다. 세 seed zero 대비 imitation-assisted SUCCESS는 유지했으나 좋은 초기 정책 유지 개선 조건은 미달이었다. V7 from-scratch 및 state-dependent exploration은 실행하지 않았다. 전체55개 테스트와 물리·checkpoint·평가 회귀를 통과했다. 상세 수치·학습 중 자기접촉·진단 한계·재현 명령은 [Standing V7 보고서](STANDING_V7.md)에 기록했다.
+
+## Standing 단계 종료와 자료 보존
+
+기본 물리·control interface 검증, scripted 및 imitation recovery는 완료했다. From-scratch PPO의 policy discovery와 좋은 정책의 장기 유지 문제는 미해결 연구 항목으로 보존한다. 이 문제를 Walking의 필수 선행조건으로 취급하지 않는다. 추가 Standing PPO 튜닝은 중단하고 별도 locomotion task에서 평지 Walking baseline을 진행한다.
+
+중요 checkpoint·trajectory·보고서·그래프·configuration은 [Standing 보존 자료](../artifacts/standing/README.md)에 기록한 지속성 있는 `artifacts/standing/local/`에 복사했다. Git에는 manifest와 README만 포함하고 binary·dataset은 제외한다. 원본 `/tmp` 자료는 삭제하지 않았다.

@@ -10,7 +10,7 @@ import sys
 import numpy as np
 import torch
 from rsl_rl.runners import OnPolicyRunner
-from .config import StandingCfg, ppo_config, MODEL_PATH
+from .config import StandingCfg, ppo_config, MODEL_PATH, REWARD_WEIGHTS
 from .env import StandingEnv
 from .normalization import warmup, assert_unchanged, validate_rollout, pre_update_metrics, configure
 from .diagnose_ppo import instrument_update
@@ -30,6 +30,7 @@ def main():
     parser.add_argument('--warmup-steps', type=int, default=500)
     parser.add_argument('--warmup-seed', type=int)
     parser.add_argument('--orientation-reward-scale', type=float, default=.05)
+    parser.add_argument('--pose-reward-weight',type=float,default=REWARD_WEIGHTS['pose'])
     parser.add_argument('--gate-after-25', action='store_true')
     parser.add_argument('--v2-baseline', type=Path)
     parser.add_argument('--v3a-baseline', type=Path)
@@ -37,9 +38,10 @@ def main():
     parser.add_argument('--policy-distribution',choices=['gaussian','squashed'],default='gaussian')
     parser.add_argument('--mean-regularization',type=float,default=0.)
     parser.add_argument('--terminal-bootstrap',action='store_true')
+    parser.add_argument('--critic-warm-start',type=Path)
     parser.add_argument('--rollout',type=int,choices=[16,32],default=16)
     parser.add_argument('--ablation-parent',type=Path)
-    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e','v4a','v4b','v5a','v5b','v6fix'])
+    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e','v4a','v4b','v5a','v5b','v6fix','v7a','v7b'])
     parser.add_argument('--previous-action-normalization',choices=['running','identity'],default='running')
     parser.add_argument('--standing-basis',type=Path)
     args = parser.parse_args()
@@ -56,7 +58,8 @@ def main():
     env_cfg = StandingCfg(num_envs=args.num_envs, seed=args.seed, stage=2 if args.v2_stage else args.stage,
                           v2_stage=args.v2_stage, smoothing_seconds=args.smoothing_tau,
                           episode_seconds=args.episode_seconds,
-                          orientation_reward_scale=args.orientation_reward_scale,action_mapping=args.action_mapping,
+                          orientation_reward_scale=args.orientation_reward_scale,pose_reward_weight=args.pose_reward_weight,
+                          action_mapping=args.action_mapping,
                           previous_action_normalization=args.previous_action_normalization,
                           action_basis='standing' if args.standing_basis else 'joint',
                           standing_basis=json.loads(args.standing_basis.read_text())['matrix'] if args.standing_basis else None)
@@ -84,6 +87,10 @@ def main():
         'gpu': torch.cuda.get_device_name(env.device)}, indent=2))
     runner = OnPolicyRunner(env, cfg, log_dir=str(args.log_dir), device=env.device)
     configure(runner.alg,env_cfg.previous_action_normalization)
+    if args.critic_warm_start is not None:
+        # critic의 가중치만 교체하고 actor·새 warm-up의 정규화·PPO optimizer는 유지한다.
+        state=torch.load(args.critic_warm_start,weights_only=False,map_location=env.device)
+        runner.alg.critic.mlp.load_state_dict({key.removeprefix('mlp.'):value for key,value in state.items() if key.startswith('mlp.')})
     normalization = None
     frozen_state = None
     if frozen:
@@ -108,7 +115,11 @@ def main():
     checkpoint_infos['policy_distribution'] = args.policy_distribution
     checkpoint_infos['mean_regularization'] = args.mean_regularization
     checkpoint_infos['terminal_bootstrap'] = args.terminal_bootstrap
+    checkpoint_infos['critic_initialization'] = 'MC warm-start' if args.critic_warm_start is not None else 'default'
+    if args.critic_warm_start is not None:
+        checkpoint_infos['critic_warm_start_sha256']=hashlib.sha256(args.critic_warm_start.read_bytes()).hexdigest()
     checkpoint_infos['orientation_reward_scale'] = env_cfg.orientation_reward_scale
+    checkpoint_infos['pose_reward_weight'] = env_cfg.pose_reward_weight
     checkpoint_infos['action_mapping'] = env_cfg.action_mapping
     checkpoint_infos['previous_action_normalization'] = env_cfg.previous_action_normalization
     checkpoint_infos['action_basis'] = env_cfg.action_basis
@@ -126,8 +137,12 @@ def main():
             metadata['policy_distribution'] = args.policy_distribution
             metadata['mean_regularization'] = args.mean_regularization
             metadata['terminal_bootstrap'] = args.terminal_bootstrap
+            metadata['critic_initialization'] = checkpoint_infos['critic_initialization']
+            if args.critic_warm_start is not None:
+                metadata['critic_warm_start_sha256']=checkpoint_infos['critic_warm_start_sha256']
             metadata['normalization'] = normalization
             metadata['orientation_reward_scale'] = env_cfg.orientation_reward_scale
+            metadata['pose_reward_weight'] = env_cfg.pose_reward_weight
             metadata['action_mapping'] = env_cfg.action_mapping
             metadata['previous_action_normalization'] = env_cfg.previous_action_normalization
             metadata['action_basis'] = env_cfg.action_basis
