@@ -84,7 +84,7 @@ class StandingCfg:
         return self.timestep * self.decimation
 
 
-def ppo_config(distribution='gaussian', mean_regularization=0.):
+def ppo_config(distribution='gaussian', mean_regularization=0., terminal_bootstrap=False):
     from mjlab.rl.config import RslRlOnPolicyRunnerCfg, RslRlModelCfg, RslRlPpoAlgorithmCfg
     cfg = asdict(RslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(hidden_dims=(64, 64), obs_normalization=True,
@@ -108,10 +108,15 @@ def ppo_config(distribution='gaussian', mean_regularization=0.):
             raise ValueError('mean regularization coefficient는 유한한 양수여야 합니다.')
         cfg['algorithm'].update(class_name='rl.mean_regularization:MeanRegularizedPPO',
             mean_regularization=mean_regularization)
+    if terminal_bootstrap:
+        if mean_regularization:
+            raise ValueError('V6 bootstrap 진단에는 mean regularization을 함께 사용하지 않습니다.')
+        cfg['algorithm']['class_name']='rl.timeout_bootstrap:TerminalBootstrapPPO'
     return cfg
 
 
 def checkpoint_ppo_config(infos):
     """기존 checkpoint는 기본 Gaussian, V5는 distribution·penalty를 복원한다."""
     infos=infos or {}
-    return ppo_config(infos.get('policy_distribution','gaussian'),infos.get('mean_regularization',0.))
+    return ppo_config(infos.get('policy_distribution','gaussian'),infos.get('mean_regularization',0.),
+        infos.get('terminal_bootstrap',False))

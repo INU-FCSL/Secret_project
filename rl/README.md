@@ -229,3 +229,13 @@ V4-B의 policy clipping은 2차원 latent에서 측정하며 12차원 관절 경
 `--policy-distribution squashed --action-mapping identity`는 PPO distribution 자체의 `a=tanh(u)`와 Jacobian을 포함한 bounded action density를 사용한다. 환경은 action을 그대로 basis에 전달한다. deterministic 평가도 `tanh(μ)`이며 entropy는 bounded distribution의 MC 추정치다. 기존 Gaussian·clip 기본값과 이전 checkpoint의 의미는 유지한다.
 
 V5-A25는 V4-B25 대비 최대·누적 오차를 12.65%/17.53% 개선했지만 최대 개선이 15% 승격 기준에 못 미쳐 종료했다. 평형·대칭 probe에서 큰 common offset이 확인돼 초기 policy loss의 3%에 해당하는 mean penalty `0.0009273962*mean(μ²)`를 V5-B에만 추가했다. V5-B25는 A25보다 물리 오차가 조금 커져 종료했다. 두 후보 모두 세 seed에서 zero를 이기지 못했다. 전체 47개 테스트와 모델·정규화·checkpoint 회귀는 통과했다. V5 결과와 안전 시험의 초기 corner 자기접촉, 세부 gradient·재현 명령은 [Standing V5 보고서](STANDING_V5.md)에 기록했다.
+
+## Standing V6: terminal bootstrap·물리 action 가치·imitation 진단
+
+`--terminal-bootstrap`은 timeout의 현재 state value 보정을 auto-reset 이전 terminal 관측 value로 교체한다. failure에는 bootstrap하지 않고 GAE 연결을 끊는다. checkpoint metadata로 이 경로를 복원하며 이전 checkpoint의 비교 의미는 유지한다. GAE 수식·reward·advantage normalization·물리 설정은 바꾸지 않았다.
+
+`rl.credit_audit`는 실제 rollout의 value/return/TD/advantage와 전체 GPU 상태 snapshot을 기록한다. 동일 상태의 81개 action grid 및 특수 명령을 첫 step에만 적용하고 이후 zero continuation으로 1/5/10/25/50-step return을 비교한다. 수치 Q gradient와 실제 PPO update의 Δμ, phase별 gradient 및 raw/normalized advantage를 계측한다. continuation이 달라 유한 Q를 실제 stochastic GAE의 정답으로 동일시하지 않는다.
+
+`rl.imitation_diagnostic`는 seed로 분리한 scripted 자료에서 같은 42→64→64→2 actor의 `tanh(mu)`를 사전학습하고, 초기 critic·고정 정규화로 PPO를 5회만 갱신한다. 48 episode 평가에서 imitation과 PPO 1~5 모두 세 seed의 zero 대비 SUCCESS 기준을 충족했다. 그러나 5회 동안 integrated 오차는 약85% 증가했다. SUCCESS 이후 추가 학습·state-dependent std 실험은 중단했다. bootstrap 수정만 적용한 새 정책 V6-Fix25는 실패했다.
+
+전체52개 테스트,18개 checkpoint 복원,12개 동일 조건 평가 trace와 CPU 물리 회귀를 확인했다. V5는 commit·일반 push했고 V6 변경은 unstaged다. 상세 수식·오류·결과·한계·다음 단계는 [Standing V6 보고서](STANDING_V6.md)에 기록했다.

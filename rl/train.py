@@ -36,9 +36,10 @@ def main():
     parser.add_argument('--action-mapping',choices=['clip','tanh','identity'],default='clip')
     parser.add_argument('--policy-distribution',choices=['gaussian','squashed'],default='gaussian')
     parser.add_argument('--mean-regularization',type=float,default=0.)
+    parser.add_argument('--terminal-bootstrap',action='store_true')
     parser.add_argument('--rollout',type=int,choices=[16,32],default=16)
     parser.add_argument('--ablation-parent',type=Path)
-    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e','v4a','v4b','v5a','v5b'])
+    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e','v4a','v4b','v5a','v5b','v6fix'])
     parser.add_argument('--previous-action-normalization',choices=['running','identity'],default='running')
     parser.add_argument('--standing-basis',type=Path)
     args = parser.parse_args()
@@ -65,7 +66,7 @@ def main():
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
     env = StandingEnv(env_cfg)
-    cfg = ppo_config(args.policy_distribution,args.mean_regularization)
+    cfg = ppo_config(args.policy_distribution,args.mean_regularization,args.terminal_bootstrap)
     cfg['num_steps_per_env']=args.rollout
     if frozen:
         cfg['seed'] = args.seed
@@ -106,6 +107,7 @@ def main():
     checkpoint_infos = {'completed_updates': 0}
     checkpoint_infos['policy_distribution'] = args.policy_distribution
     checkpoint_infos['mean_regularization'] = args.mean_regularization
+    checkpoint_infos['terminal_bootstrap'] = args.terminal_bootstrap
     checkpoint_infos['orientation_reward_scale'] = env_cfg.orientation_reward_scale
     checkpoint_infos['action_mapping'] = env_cfg.action_mapping
     checkpoint_infos['previous_action_normalization'] = env_cfg.previous_action_normalization
@@ -123,6 +125,7 @@ def main():
             metadata = dict(infos or {})
             metadata['policy_distribution'] = args.policy_distribution
             metadata['mean_regularization'] = args.mean_regularization
+            metadata['terminal_bootstrap'] = args.terminal_bootstrap
             metadata['normalization'] = normalization
             metadata['orientation_reward_scale'] = env_cfg.orientation_reward_scale
             metadata['action_mapping'] = env_cfg.action_mapping
