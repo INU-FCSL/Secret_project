@@ -213,3 +213,13 @@ Stage A에서 64개 환경, 100 update, rollout 16, 학습 seed 314를 사용했
 공통 training seed 42424, warm-up seed 52424로 V3-A parent 25회, V3-C 25회, V3-E 100회를 실행했다. V3-C는 경계 포화를 줄였지만 오차 개선이 8.52%/9.31%로 승격 기준에 못 미쳐 중단했고 V3-D는 건너뛰었다. V3-E는 V3-A에서 rollout만 32로 바꿨으며 25회에서 16.58%/19.06% 개선되어 연장했다. 최적 75회 정책도 zero보다 최대·누적 오차가 커서 `PARTIAL`이며 기립 성공 기준으로 채택하지 않는다. 자동 튜닝은 종료했다.
 
 모든 checkpoint의 관절별 action 편향·previous action 관측 이동·안전성·재현 명령과 비교 한계는 [Standing V3-C/D/E 보고서](STANDING_V3CDE.md)에 기록했다. 물리 모델과 정규화 구현, reward 기본값 `0.05`는 유지한다. rollout 32는 같은 update 수에서 환경 표본 수를 두 배로 늘리므로 개선을 기여도 할당 효과만으로 해석할 수 없다.
+
+## Standing V4: previous action 의미 정규화와 reduced basis 진단
+
+`--previous-action-normalization identity`는 actor와 critic의 앞 30차원에 기존 정규화를 적용하고 마지막 12차원 smoothed joint action은 그대로 전달한다. 기본값은 기존 `running`이다. 정규화 모드와 mask를 checkpoint metadata에 기록하고 loader에서 복원한다. 관측은 42차원을 유지하며 state 통계는 기존 32,000개 warm-up 관측에서 준비해 고정한다.
+
+V4-A는 V3-E 설정의 새 정책으로 25회 학습했지만 최대·누적 오차 개선이 9.67%/9.61%로 승격 기준에 못 미쳐 연장하지 않았다. previous action 입력의 ±10~13 증폭은 제거됐지만 이것만으로 자세 제어에 성공하지 못했다.
+
+`rl.action_subspace`는 지정 CPU Python에서 평형과 네 작은 외란 상태, 0.2/0.5/1/2초 응답의 Jacobian·SVD와 저장 trajectory의 에너지를 분석한다. `--design-basis`는 판정 조건을 통과한 자료에서 knee pitch/roll 차등 두 모드의 scale을 정하고 단일축·결합 안전 시험을 수행한다. `--standing-basis <basis.json>`으로 측정된 행렬을 명시하면 정책 출력만 2차원으로 바뀌고 12차원 실제 필터 상태와 관측 42차원은 유지한다. 기본 action은 여전히 독립 joint 12차원이다.
+
+V4-B의 policy clipping은 2차원 latent에서 측정하며 12차원 관절 경계 지표와 구분한다. zero/scripted 비교 기준은 기존 12차원 제어기를 유지한다. V4-B도 25회에서 실패해 추가 학습과 자동 튜닝을 종료했다. Walking용 action space로 채택하지 않는다. 상세 결과·비교 한계·재현 명령은 [Standing V4 보고서](STANDING_V4.md)에 기록했다.

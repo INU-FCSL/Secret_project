@@ -11,6 +11,8 @@ from rsl_rl.models.mlp_model import MLPModel
 from tensordict import TensorDict
 from .config import ppo_config
 from .action_mapping import bounded_action
+from .normalization import configure_model, checkpoint_mode
+from .action_diagnostics import mode_decomposition
 
 
 class ActionTrace:
@@ -20,7 +22,8 @@ class ActionTrace:
     def __call__(self,env,obs,action,reward,done,extras,alive,time):
         d=extras['diagnostics']
         error=torch.stack((d['roll'],d['pitch']),-1)-env.reference_standing_orientation[:2]
-        row=dict(requested=action,bounded=d['bounded_actions'],applied=d['applied_actions'],target=d['targets'],
+        row=dict(requested=d.get('raw_joint_actions',action),policy_raw=action,
+            bounded=d['bounded_actions'],applied=d['applied_actions'],target=d['targets'],
             actual=extras['terminal_observation']['actor'][:,6:18]+env.default_joint_position,
             error=error.rad2deg(),omega=obs['actor'][:,3:5],raw=obs['actor'],
             reward=reward,valid=alive,after=alive&(time>=d['push_start']),
@@ -34,10 +37,12 @@ class ActionTrace:
 def action_summary(data,action_mapping='clip'):
     mask=data['valid']
     requested=data['requested'][mask]
+    policy_raw=data.get('policy_raw',data['requested'])[mask]
+    policy_bounded=np.tanh(policy_raw) if action_mapping=='tanh' else policy_raw.clip(-1,1)
     applied=data['applied'][mask]
     clipped=requested.clip(-1,1)
     bounded=data['bounded'][mask] if 'bounded' in data else (np.tanh(requested) if action_mapping=='tanh' else clipped)
-    gain=1-bounded**2 if action_mapping=='tanh' else (np.abs(requested)<1).astype(float)
+    gain=1-np.tanh(policy_raw)**2 if action_mapping=='tanh' else (np.abs(policy_raw)<1).astype(float)
     feedback={}
     for key in ('requested','bounded','applied'):
         if key=='bounded' and key not in data:
@@ -51,13 +56,18 @@ def action_summary(data,action_mapping='clip'):
                 velocity_correlation=correlation(data['omega'][...,j][after],differential[...,j][after]) if after.any() else None,
                 differential=stats(differential[...,j][after]))
     return dict(requested=stats(requested,axis=0),bounded=stats(bounded,axis=0),applied=stats(applied,axis=0),
-        outside_range_fraction=float((np.abs(requested)>1).mean()),
-        actual_clipping_fraction=float((requested!=clipped).mean()) if action_mapping=='clip' else 0.,
+        policy_raw=stats(policy_raw,axis=0),
+        policy_bounded=stats(policy_bounded,axis=0),policy_boundary_fraction=float((np.abs(policy_bounded)>=.99).mean()),
+        policy_positive_99=(policy_bounded>=.99).mean(0).tolist(),policy_negative_99=(policy_bounded<=-.99).mean(0).tolist(),
+        joint_requested_outside_fraction=float((np.abs(requested)>1).mean()),
+        outside_range_fraction=float((np.abs(policy_raw)>1).mean()),
+        actual_clipping_fraction=float((np.abs(policy_raw)>1).mean()) if action_mapping=='clip' else 0.,
         action_mapping=action_mapping,bounded_90_fraction=float((np.abs(bounded)>=.9).mean()),
         bounded_99_fraction=float((np.abs(bounded)>=.99).mean()),
         bounded_positive_99=(bounded>=.99).mean(0).tolist(),bounded_negative_99=(bounded<=-.99).mean(0).tolist(),
         applied_positive_99=(applied>=.99).mean(0).tolist(),applied_negative_99=(applied<=-.99).mean(0).tolist(),
         local_gain=stats(gain,axis=0),gain_below_half=float((gain<.5).mean()),gain_below_tenth=float((gain<.1).mean()),
+        modes={key:mode_decomposition(value) for key,value in [('requested',requested),('bounded',bounded),('applied',applied)]},
         boundary_applied_fraction=float((np.abs(applied)>=.99).mean()),
         target_degrees=stats(np.rad2deg(data['target'][mask]),axis=0),
         actual_degrees=stats(np.rad2deg(data['actual'][mask]),axis=0),feedback=feedback)
@@ -81,12 +91,15 @@ def aggregate(rows):
 def policy_probe(checkpoint,data,action_mapping='clip'):
     """같은 관측에서 자세·각속도만 바꿔 국소 피드백 부호를 확인한다."""
     actor_cfg=ppo_config()['actor']
+    state=torch.load(checkpoint,weights_only=False,map_location='cuda')
+    output_dim=state['actor_state_dict']['mlp.4.weight'].shape[0]
     raw=torch.tensor(data['raw'][data['valid']],device='cuda')
     observation=TensorDict({'actor':raw[:1]},batch_size=[1])
-    actor=MLPModel(observation,{'actor':['actor']},'actor',12,hidden_dims=actor_cfg['hidden_dims'],
+    actor=MLPModel(observation,{'actor':['actor']},'actor',output_dim,hidden_dims=actor_cfg['hidden_dims'],
         activation=actor_cfg['activation'],obs_normalization=True,distribution_cfg=actor_cfg['distribution_cfg']).cuda()
-    state=torch.load(checkpoint,weights_only=False,map_location='cuda')
-    actor.load_state_dict(state['actor_state_dict']);actor.eval()
+    actor.load_state_dict(state['actor_state_dict'])
+    configure_model(actor,checkpoint_mode(state.get('infos')))
+    actor.eval()
     normalized=actor.obs_normalizer(raw)
     groups={'gravity':(0,3),'angular_velocity':(3,6),'joint_position':(6,18),
             'joint_velocity':(18,30),'previous_action':(30,42)}
@@ -108,7 +121,11 @@ def policy_probe(checkpoint,data,action_mapping='clip'):
     gravity=selected[:,:3]
     rpy=torch.stack((torch.atan2(-gravity[:,1],-gravity[:,2]),torch.asin(gravity[:,0].clamp(-1,1))),-1)
     def differential(obs):
-        knees=bounded_action(actor(TensorDict({'actor':obs},batch_size=[len(obs)])),action_mapping)[:,2::3]
+        command=bounded_action(actor(TensorDict({'actor':obs},batch_size=[len(obs)])),action_mapping)
+        matrix=state.get('infos',{}).get('standing_basis')
+        if matrix is not None:
+            command=command@torch.tensor(matrix,device=command.device,dtype=command.dtype).T
+        knees=command[:,2::3]
         return torch.stack(((knees[:,0]-knees[:,1]+knees[:,2]-knees[:,3])/4,
                             (knees[:,0]+knees[:,1]-knees[:,2]-knees[:,3])/4),-1)
     feedback={}

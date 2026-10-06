@@ -12,7 +12,7 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 from .config import StandingCfg, ppo_config, MODEL_PATH
 from .env import StandingEnv
-from .normalization import warmup, assert_unchanged, validate_rollout, pre_update_metrics
+from .normalization import warmup, assert_unchanged, validate_rollout, pre_update_metrics, configure
 from .diagnose_ppo import instrument_update
 
 
@@ -36,7 +36,9 @@ def main():
     parser.add_argument('--action-mapping',choices=['clip','tanh'],default='clip')
     parser.add_argument('--rollout',type=int,choices=[16,32],default=16)
     parser.add_argument('--ablation-parent',type=Path)
-    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e'])
+    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e','v4a','v4b'])
+    parser.add_argument('--previous-action-normalization',choices=['running','identity'],default='running')
+    parser.add_argument('--standing-basis',type=Path)
     args = parser.parse_args()
     if args.iterations < 1:
         parser.error('iteration은 양수여야 합니다.')
@@ -49,7 +51,10 @@ def main():
     env_cfg = StandingCfg(num_envs=args.num_envs, seed=args.seed, stage=2 if args.v2_stage else args.stage,
                           v2_stage=args.v2_stage, smoothing_seconds=args.smoothing_tau,
                           episode_seconds=args.episode_seconds,
-                          orientation_reward_scale=args.orientation_reward_scale,action_mapping=args.action_mapping)
+                          orientation_reward_scale=args.orientation_reward_scale,action_mapping=args.action_mapping,
+                          previous_action_normalization=args.previous_action_normalization,
+                          action_basis='standing' if args.standing_basis else 'joint',
+                          standing_basis=json.loads(args.standing_basis.read_text())['matrix'] if args.standing_basis else None)
     frozen = args.normalization == 'warmup-frozen'
     if frozen:
         random.seed(args.seed)
@@ -73,6 +78,7 @@ def main():
         'reference_height': env.reference_standing_height,
         'gpu': torch.cuda.get_device_name(env.device)}, indent=2))
     runner = OnPolicyRunner(env, cfg, log_dir=str(args.log_dir), device=env.device)
+    configure(runner.alg,env_cfg.previous_action_normalization)
     normalization = None
     frozen_state = None
     if frozen:
@@ -96,6 +102,9 @@ def main():
     checkpoint_infos = {'completed_updates': 0}
     checkpoint_infos['orientation_reward_scale'] = env_cfg.orientation_reward_scale
     checkpoint_infos['action_mapping'] = env_cfg.action_mapping
+    checkpoint_infos['previous_action_normalization'] = env_cfg.previous_action_normalization
+    checkpoint_infos['action_basis'] = env_cfg.action_basis
+    checkpoint_infos['standing_basis'] = env_cfg.standing_basis
     if frozen:
         checkpoint_infos['normalization'] = normalization
     initial_state.update(iter=0, infos=checkpoint_infos)
@@ -109,6 +118,9 @@ def main():
             metadata['normalization'] = normalization
             metadata['orientation_reward_scale'] = env_cfg.orientation_reward_scale
             metadata['action_mapping'] = env_cfg.action_mapping
+            metadata['previous_action_normalization'] = env_cfg.previous_action_normalization
+            metadata['action_basis'] = env_cfg.action_basis
+            metadata['standing_basis'] = env_cfg.standing_basis
             metadata.setdefault('completed_updates', len(metrics))
             native_save(path, infos=metadata)
         runner.save = save_frozen_checkpoint

@@ -32,7 +32,7 @@ def correct_feedback(summary):
         local['roll']['position_per_degree']['mean']>1e-5 and local['pitch']['position_per_degree']['mean']<-1e-5)
 
 
-def classify(candidate,parent,zero):
+def classify(candidate,parent,zero,version='v3'):
     metrics=candidate['aggregate'];old=parent['aggregate']
     seed_improved=[dict(seed=row['seed'],peak=row['peak_orientation_error']<baseline['peak_orientation_error'],
         integrated=row['integrated_orientation_error']<baseline['integrated_orientation_error'])
@@ -45,18 +45,27 @@ def classify(candidate,parent,zero):
     bounded=candidate['actions']['bounded_99_fraction'];old_bounded=parent['actions']['bounded_99_fraction']
     feedback=correct_feedback(candidate) and not correct_feedback(parent)
     boundary_improvement=boundary<old_boundary-1e-4 or bounded<old_bounded-1e-4
+    bias=float(np.abs(candidate['actions']['applied']['mean']).mean()) if 'applied' in candidate['actions'] else None
+    old_bias=float(np.abs(parent['actions']['applied']['mean']).mean()) if 'applied' in parent['actions'] else None
+    bias_improvement=bias is not None and old_bias is not None and bias<old_bias-1e-4
     recovery=(metrics['push_recovery_rate'] or 0)>(old['push_recovery_rate'] or 0)+1e-6
     common_parent_return=candidate.get('common_parent_return',old['mean_return'])
     aligned=metrics['mean_return']>common_parent_return+1e-4 and peak_reduction>=.15 and integrated_reduction>=.15
     collapsed=correct_feedback(parent) and not correct_feedback(candidate)
     severe_boundary=boundary>.9 and boundary>old_boundary+.15
-    partial=(safety and peak_reduction>=.15 and integrated_reduction>=.15 and
-        (feedback or boundary_improvement or recovery or aligned) and not collapsed and not severe_boundary)
+    input_ok=True
+    if version=='v4':
+        previous=candidate['policy_probe']['observations']['previous_action']
+        input_ok=(max(previous['normalized']['max'])<=1.000001 and min(previous['normalized']['min'])>=-1.000001)
+    success=success and input_ok
+    partial=(safety and input_ok and peak_reduction>=.15 and integrated_reduction>=.15 and
+        (feedback or boundary_improvement or recovery or (bias_improvement if version=='v4' else aligned)) and not collapsed and not severe_boundary)
     status='SUCCESS' if success else ('PARTIAL' if partial else 'FAIL')
     return dict(status=status,safe=safety,per_seed_zero_improved=seed_improved,
         peak_reduction=peak_reduction,integrated_reduction=integrated_reduction,
         feedback_improved=feedback,boundary_improved=boundary_improvement,recovery_improved=recovery,
         return_alignment_improved=aligned,feedback_collapsed=collapsed,severe_boundary=severe_boundary,
+        persistent_bias_improved=bias_improvement,mean_absolute_applied_bias=bias,semantic_input_ok=input_ok,
         thresholds=dict(partial_reduction=.15,saturation_fraction=.01,severe_boundary=.9))
 
 
@@ -75,15 +84,17 @@ def common_return(summary,scale):
 
 def measure(cfg,output,label,checkpoint=None):
     rows=[];traces=[]
+    actual_cfg=replace(cfg,action_basis='joint',standing_basis=None) if checkpoint is None else cfg
     for seed in SEEDS:
         recorder=ActionTrace()
-        row=evaluate(replace(cfg,num_envs=16,seed=seed,balanced_push_directions=True),checkpoint=checkpoint,
+        row=evaluate(replace(actual_cfg,num_envs=16,seed=seed,balanced_push_directions=True),checkpoint=checkpoint,
             random=label=='random',scripted=label=='scripted',step_callback=recorder)
         rows.append(row);traces.append(recorder.arrays())
     data={key:np.concatenate([trace[key] for trace in traces],axis=1) for key in traces[0]}
     path=output/f'{label}.npz';np.savez_compressed(path,**data)
     summary=dict(per_seed=rows,aggregate=aggregate(rows),actions=action_summary(data,cfg.action_mapping),trace=str(path),
-        profile=dict(action_mapping=cfg.action_mapping,orientation_reward_scale=cfg.orientation_reward_scale))
+        profile=dict(action_mapping=actual_cfg.action_mapping,orientation_reward_scale=actual_cfg.orientation_reward_scale,
+            action_basis=actual_cfg.action_basis,previous_action_normalization=actual_cfg.previous_action_normalization))
     if checkpoint:
         summary['checkpoint']=str(checkpoint)
         summary['policy_probe']=policy_probe(checkpoint,data,cfg.action_mapping)
@@ -115,7 +126,7 @@ def evaluate_candidate(directory,output,name,checkpoints,parent_path=None,cfg=No
         if parent:
             reference=parent['checkpoints'].get(key,parent['best'])
             summary['common_parent_return']=common_return(reference,cfg.orientation_reward_scale)
-            summary['classification']=classify(summary,reference,result['baselines']['zero'])
+            summary['classification']=classify(summary,reference,result['baselines']['zero'],'v4' if name.startswith('v4') else 'v3')
         result['checkpoints'][key]=summary;save(path,result)
     trained=[(int(i),row) for i,row in result['checkpoints'].items() if int(i)>0 and safe(row)]
     successes=[(i,row) for i,row in trained if parent and row['classification']['status']=='SUCCESS']
@@ -134,8 +145,9 @@ def evaluate_candidate(directory,output,name,checkpoints,parent_path=None,cfg=No
     result.update(best_checkpoint=best_iteration if choices else None,best_eligible=bool(choices),
                   diagnostic_checkpoint=best_iteration,best=best,parent=str(parent_path) if parent_path else None)
     if parent:
-        best['common_parent_return']=common_return(parent['best'],cfg.orientation_reward_scale)
-        decision=classify(best,parent['best'],result['baselines']['zero'])
+        reference=parent['checkpoints'].get(str(best_iteration),parent['best']) if name.startswith('v4') else parent['best']
+        best['common_parent_return']=common_return(reference,cfg.orientation_reward_scale)
+        decision=classify(best,reference,result['baselines']['zero'],'v4' if name.startswith('v4') else 'v3')
         result['decision']=decision
         save(output/'decision.json',decision)
     save(path,result)

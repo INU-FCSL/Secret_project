@@ -43,6 +43,15 @@ class StandingEnv(VecEnv):
         self.cfg = cfg
         self.device = cfg.device
         self.num_envs = cfg.num_envs
+        self.basis_matrix = None
+        if cfg.action_basis=='standing':
+            matrix=np.asarray(cfg.standing_basis,dtype=float)
+            if (matrix.ndim!=2 or matrix.shape[0]!=12 or matrix.shape[1] not in (2,4) or
+                not np.isfinite(matrix).all() or np.linalg.matrix_rank(matrix)!=matrix.shape[1] or
+                np.max(np.abs(matrix).sum(-1))>1.000001):
+                raise ValueError('basis는 독립적인 2/4차원이며 12차원 안전 명령 범위를 보장해야 합니다.')
+            self.num_actions=matrix.shape[1]
+            self.basis_matrix=torch.tensor(matrix,dtype=torch.float32,device=self.device)
         if not self.device.startswith('cuda') or not torch.cuda.is_available():
             raise RuntimeError('이 환경은 CUDA와 MuJoCo Warp가 필요합니다.')
         torch.manual_seed(cfg.seed)
@@ -201,12 +210,16 @@ class StandingEnv(VecEnv):
         return counts > 0, self_count, abnormal > 0
 
     def step(self, actions):
-        if tuple(actions.shape) != (self.num_envs, 12):
-            raise ValueError('action shape은 (환경 수, 12)여야 합니다.')
+        if tuple(actions.shape) != (self.num_envs, self.num_actions):
+            raise ValueError(f'action shape은 (환경 수, {self.num_actions})여야 합니다.')
         actions = actions.to(device=self.device, dtype=torch.float32).detach()
         if not torch.isfinite(actions).all():
             raise ValueError('action에 NaN 또는 무한값이 있습니다.')
         requested = bounded_action(actions,self.cfg.action_mapping)
+        raw_joint_actions=actions
+        if self.basis_matrix is not None:
+            raw_joint_actions=actions@self.basis_matrix.T
+            requested=requested@self.basis_matrix.T
         delta = requested - self.previous_actions
         self.requested_actions.copy_(requested)
         # 0.75초 시정수의 필터. 관측에 실제 적용 action을 포함해 필터 상태를 노출한다.
@@ -258,7 +271,7 @@ class StandingEnv(VecEnv):
         done = terminated | timeout
         terminal_obs = self.get_observations().clone()
         diagnostics = dict(height=self.qpos[:, 2].clone(), gravity=gravity.clone(),
-            raw_actions=actions.clone(), bounded_actions=requested.clone(),
+            raw_actions=actions.clone(), raw_joint_actions=raw_joint_actions.clone(), bounded_actions=requested.clone(),
             feet=feet.clone(), self_contacts=self_contacts.clone(), peak_torque=peak,
             saturation_steps=saturation, targets=self.joint_targets.clone(),
             applied_actions=self.previous_actions.clone(), reasons=reasons,

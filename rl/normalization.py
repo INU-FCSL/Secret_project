@@ -1,6 +1,61 @@
 """관측 통계를 먼저 준비하고 PPO의 수집·갱신·재로딩 동안 고정한다."""
 import hashlib
 import torch
+from rsl_rl.modules import EmpiricalNormalization
+
+
+class SemanticNormalization(EmpiricalNormalization):
+    """앞 30차원만 정규화하고 controller의 12차원 필터 상태를 그대로 전달한다."""
+    previous_action_normalization = 'identity'
+
+    def forward(self, x):
+        state = (x[..., :30]-self._mean[..., :30])/(self._std[..., :30]+self.eps)
+        return torch.cat((state,x[..., 30:]),dim=-1)
+
+    def inverse(self, y):
+        state = y[..., :30]*(self._std[..., :30]+self.eps)+self._mean[..., :30]
+        return torch.cat((state,y[..., 30:]),dim=-1)
+
+
+def configure_model(model, mode='running'):
+    """buffer 이름·차원을 보존해 기존 checkpoint와 의미 정규화 모드를 구분한다."""
+    if mode not in ('running','identity'):
+        raise ValueError('previous action 정규화는 running 또는 identity여야 합니다.')
+    old=model.obs_normalizer
+    current=getattr(old,'previous_action_normalization','running')
+    if current==mode:
+        return
+    if old._mean.shape[-1]!=42:
+        raise ValueError('의미 정규화에는 기존 42차원 관측이 필요합니다.')
+    cls=SemanticNormalization if mode=='identity' else EmpiricalNormalization
+    new=cls(42,eps=old.eps,until=old.until).to(old._mean.device)
+    new.load_state_dict(old.state_dict())
+    new.train(old.training)
+    model.obs_normalizer=new
+
+
+def configure(alg, mode='running'):
+    for model in (alg.actor,alg.critic):
+        configure_model(model,mode)
+
+
+def checkpoint_mode(infos):
+    return (infos or {}).get('previous_action_normalization',
+        (infos or {}).get('normalization',{}).get('previous_action_normalization','running'))
+
+
+@torch.no_grad()
+def previous_input_statistics(alg, raw):
+    transformed=alg.actor.obs_normalizer(raw)
+    critic=alg.critic.obs_normalizer(raw)
+    values=transformed[:,30:]
+    identity=getattr(alg.actor.obs_normalizer,'previous_action_normalization','running')=='identity'
+    if identity and (not torch.equal(values,raw[:,30:]) or not torch.equal(values,critic[:,30:]) or
+                     values.abs().max()>1.000001):
+        raise RuntimeError('previous action 의미 범위 또는 actor/critic 입력 일치가 깨졌습니다.')
+    return dict(mean=values.double().mean(0).cpu().tolist(),std=values.double().std(0,unbiased=False).cpu().tolist(),
+        min=values.min(0).values.cpu().tolist(),max=values.max(0).values.cpu().tolist(),
+        identity_exact=bool(torch.equal(values,raw[:,30:])),actor_critic_equal=bool(torch.equal(values,critic[:,30:])))
 
 
 def parameter_hash(alg):
@@ -33,6 +88,7 @@ def freeze(alg):
 
 def restore(alg, infos):
     """기존 checkpoint 형식을 유지하며 V3-A 고정 설정을 복원한다."""
+    configure(alg,checkpoint_mode(infos))
     if infos and infos.get('normalization', {}).get('mode') == 'warmup_frozen':
         freeze(alg)
         return True
@@ -55,6 +111,10 @@ def initialize(alg, raw):
             normalizer._mean.copy_(mean)
             normalizer._var.copy_(variance)
             normalizer._std.copy_(variance.sqrt())
+            if getattr(normalizer,'previous_action_normalization','running')=='identity':
+                normalizer._mean[:,30:].zero_()
+                normalizer._var[:,30:].fill_(1.)
+                normalizer._std[:,30:].fill_(1.)
             normalizer.count.fill_(raw.shape[0])
     freeze(alg)
     expected = snapshot(alg)
@@ -112,6 +172,12 @@ def warmup(env, alg, steps=500, seed=12718, output=None):
                     std=normalizer.std.cpu().tolist(), actor_critic_equal=True,
                     collection_statistics_unchanged=True, weights_unchanged=True,
                     repeat_observation_exact=True, events=events)
+    metadata.update(previous_action_normalization=getattr(normalizer,'previous_action_normalization','running'),
+        normalization_mask=[True]*30+[getattr(normalizer,'previous_action_normalization','running')!='identity']*12,
+        previous_action_input=previous_input_statistics(alg,raw),
+        previous_action_raw=dict(mean=raw[:,30:].double().mean(0).cpu().tolist(),
+            std=raw[:,30:].double().std(0,unbiased=False).cpu().tolist(),
+            min=raw[:,30:].min(0).values.cpu().tolist(),max=raw[:,30:].max(0).values.cpu().tolist()))
     if output is not None:
         torch.save(raw.cpu(), output)
     return metadata, expected

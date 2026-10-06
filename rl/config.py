@@ -35,10 +35,19 @@ class StandingCfg:
     recovery_degrees: float = .1
     orientation_reward_scale: float = .05
     action_mapping: str = 'clip'
+    previous_action_normalization: str = 'running'
+    action_basis: str = 'joint'
+    standing_basis: tuple[tuple[float, ...], ...] | None = None
     min_height: float = .10
     max_tilt_degrees: float = 45.
 
     def __post_init__(self):
+        if self.action_basis not in ('joint','standing'):
+            raise ValueError('action basis는 joint 또는 standing이어야 합니다.')
+        if self.action_basis=='standing' and self.standing_basis is None:
+            raise ValueError('standing basis의 측정된 행렬이 필요합니다.')
+        if self.previous_action_normalization not in ('running','identity'):
+            raise ValueError('previous action 정규화는 running 또는 identity여야 합니다.')
         if self.action_mapping not in ('clip','tanh'):
             raise ValueError('action mapping은 clip 또는 tanh여야 합니다.')
         if self.v2_stage is not None and self.v2_stage not in V2_DISTURBANCES:

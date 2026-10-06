@@ -27,6 +27,7 @@ class ScriptedController:
         self.basis = torch.tensor([patterns()[name].tolist() for name in names], device=env.device).T
         self.reference = env.reference_standing_orientation[:2]
         self.mapping = env.cfg.action_mapping
+        self.basis_inverse = torch.linalg.pinv(env.basis_matrix) if env.basis_matrix is not None else None
 
     def __call__(self, obs):
         gravity = obs['actor'][:, :3]
@@ -34,7 +35,10 @@ class ScriptedController:
                            torch.asin(gravity[:,0].clamp(-1,1))), -1)
         omega = obs['actor'][:,3:5]
         coefficients = torch.rad2deg(2*(self.reference-rpy)-.2*omega) @ self.inverse.T
-        return equivalent_raw(coefficients.clamp(-1,1) @ self.basis.T,self.mapping)
+        command=coefficients.clamp(-1,1) @ self.basis.T
+        if self.basis_inverse is not None:
+            command=(command@self.basis_inverse.T).clamp(-1,1)
+        return equivalent_raw(command,self.mapping)
 
 
 @torch.inference_mode()
@@ -80,9 +84,9 @@ def evaluate(cfg, checkpoint=None, random=False, scripted=False, *, step_callbac
             if policy is not None:
                 action = policy(obs)
             elif random:
-                action = 2*torch.rand((n,12),generator=rng,device=device)-1
+                action = 2*torch.rand((n,env.num_actions),generator=rng,device=device)-1
             else:
-                action = torch.zeros((n,12),device=device)
+                action = torch.zeros((n,env.num_actions),device=device)
             obs,reward,done,extras = env.step(action)
             d = extras['diagnostics']
             if step_callback is not None:
@@ -177,12 +181,15 @@ def main():
     parser.add_argument('--scripted',action='store_true')
     parser.add_argument('--orientation-reward-scale',type=float,default=.05)
     parser.add_argument('--action-mapping',choices=['clip','tanh'],default='clip')
+    parser.add_argument('--standing-basis',type=Path)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     cfg=StandingCfg(num_envs=args.num_envs,stage=args.stage,v2_stage=args.v2_stage,
         smoothing_seconds=args.smoothing_tau,seed=args.seed,episode_seconds=args.seconds,
         push_force=args.push_force,balanced_push_directions=True,
-        orientation_reward_scale=args.orientation_reward_scale,action_mapping=args.action_mapping)
+        orientation_reward_scale=args.orientation_reward_scale,action_mapping=args.action_mapping,
+        action_basis='standing' if args.standing_basis else 'joint',
+        standing_basis=json.loads(args.standing_basis.read_text())['matrix'] if args.standing_basis else None)
     result=evaluate(cfg,args.checkpoint,args.random,args.scripted)
     args.output.write_text(json.dumps(result,indent=2,allow_nan=False))
     print(f'평가 결과 저장: {args.output}')
