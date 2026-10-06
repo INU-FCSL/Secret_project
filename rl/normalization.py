@@ -207,7 +207,9 @@ def validate_rollout(env, alg, expected):
 def pre_update_metrics(alg):
     st = alg.storage
     actor = alg.actor
-    actor.distribution.update(actor(st.observations.flatten(0, 1)))
+    observations = st.observations.flatten(0, 1)
+    # deterministic_output이 tanh(μ)인 distribution도 원래 MLP μ로 갱신한다.
+    actor.distribution.update(actor.mlp(actor.get_latent(observations)))
     exact_kl = actor.get_kl_divergence(tuple(p.flatten(0, 1) for p in st.distribution_params),
                                          actor.output_distribution_params)
     logratio = actor.get_output_log_prob(st.actions.flatten(0, 1))-st.actions_log_prob.flatten().detach()

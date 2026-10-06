@@ -33,13 +33,17 @@ def main():
     parser.add_argument('--gate-after-25', action='store_true')
     parser.add_argument('--v2-baseline', type=Path)
     parser.add_argument('--v3a-baseline', type=Path)
-    parser.add_argument('--action-mapping',choices=['clip','tanh'],default='clip')
+    parser.add_argument('--action-mapping',choices=['clip','tanh','identity'],default='clip')
+    parser.add_argument('--policy-distribution',choices=['gaussian','squashed'],default='gaussian')
+    parser.add_argument('--mean-regularization',type=float,default=0.)
     parser.add_argument('--rollout',type=int,choices=[16,32],default=16)
     parser.add_argument('--ablation-parent',type=Path)
-    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e','v4a','v4b'])
+    parser.add_argument('--ablation-name',choices=['v3c','v3d','v3e','v4a','v4b','v5a','v5b'])
     parser.add_argument('--previous-action-normalization',choices=['running','identity'],default='running')
     parser.add_argument('--standing-basis',type=Path)
     args = parser.parse_args()
+    if (args.policy_distribution=='squashed') != (args.action_mapping=='identity'):
+        parser.error('squashed distribution과 identity mapping은 함께 사용해야 합니다.')
     if args.iterations < 1:
         parser.error('iteration은 양수여야 합니다.')
     if args.ablation_parent and (args.iterations!=100 or args.normalization!='warmup-frozen' or
@@ -61,7 +65,7 @@ def main():
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
     env = StandingEnv(env_cfg)
-    cfg = ppo_config()
+    cfg = ppo_config(args.policy_distribution,args.mean_regularization)
     cfg['num_steps_per_env']=args.rollout
     if frozen:
         cfg['seed'] = args.seed
@@ -100,6 +104,8 @@ def main():
         print(f"관측 준비 검증 통과: {normalization['observations']}개, 갱신 전 KL={preflight['exact_kl']:.9g}", flush=True)
     initial_state = runner.alg.save()
     checkpoint_infos = {'completed_updates': 0}
+    checkpoint_infos['policy_distribution'] = args.policy_distribution
+    checkpoint_infos['mean_regularization'] = args.mean_regularization
     checkpoint_infos['orientation_reward_scale'] = env_cfg.orientation_reward_scale
     checkpoint_infos['action_mapping'] = env_cfg.action_mapping
     checkpoint_infos['previous_action_normalization'] = env_cfg.previous_action_normalization
@@ -115,6 +121,8 @@ def main():
         native_save = runner.save
         def save_frozen_checkpoint(path, infos=None):
             metadata = dict(infos or {})
+            metadata['policy_distribution'] = args.policy_distribution
+            metadata['mean_regularization'] = args.mean_regularization
             metadata['normalization'] = normalization
             metadata['orientation_reward_scale'] = env_cfg.orientation_reward_scale
             metadata['action_mapping'] = env_cfg.action_mapping
@@ -204,6 +212,7 @@ def main():
                 '--output',str(evaluation)]
             subprocess.run(command,check=True)
             decision=json.loads((evaluation/'decision.json').read_text())
+            (args.log_dir/'gate_25.json').write_text(json.dumps(decision,indent=2,allow_nan=False))
             if decision['status'] in ('SUCCESS','PARTIAL'):
                 runner.current_learning_iteration=len(metrics)
                 runner.learn(75,init_at_random_ep_len=False)

@@ -223,3 +223,9 @@ V4-A는 V3-E 설정의 새 정책으로 25회 학습했지만 최대·누적 오
 `rl.action_subspace`는 지정 CPU Python에서 평형과 네 작은 외란 상태, 0.2/0.5/1/2초 응답의 Jacobian·SVD와 저장 trajectory의 에너지를 분석한다. `--design-basis`는 판정 조건을 통과한 자료에서 knee pitch/roll 차등 두 모드의 scale을 정하고 단일축·결합 안전 시험을 수행한다. `--standing-basis <basis.json>`으로 측정된 행렬을 명시하면 정책 출력만 2차원으로 바뀌고 12차원 실제 필터 상태와 관측 42차원은 유지한다. 기본 action은 여전히 독립 joint 12차원이다.
 
 V4-B의 policy clipping은 2차원 latent에서 측정하며 12차원 관절 경계 지표와 구분한다. zero/scripted 비교 기준은 기존 12차원 제어기를 유지한다. V4-B도 25회에서 실패해 추가 학습과 자동 튜닝을 종료했다. Walking용 action space로 채택하지 않는다. 상세 결과·비교 한계·재현 명령은 [Standing V4 보고서](STANDING_V4.md)에 기록했다.
+
+## Standing V5: tanh 정책 분포와 평균 편향
+
+`--policy-distribution squashed --action-mapping identity`는 PPO distribution 자체의 `a=tanh(u)`와 Jacobian을 포함한 bounded action density를 사용한다. 환경은 action을 그대로 basis에 전달한다. deterministic 평가도 `tanh(μ)`이며 entropy는 bounded distribution의 MC 추정치다. 기존 Gaussian·clip 기본값과 이전 checkpoint의 의미는 유지한다.
+
+V5-A25는 V4-B25 대비 최대·누적 오차를 12.65%/17.53% 개선했지만 최대 개선이 15% 승격 기준에 못 미쳐 종료했다. 평형·대칭 probe에서 큰 common offset이 확인돼 초기 policy loss의 3%에 해당하는 mean penalty `0.0009273962*mean(μ²)`를 V5-B에만 추가했다. V5-B25는 A25보다 물리 오차가 조금 커져 종료했다. 두 후보 모두 세 seed에서 zero를 이기지 못했다. 전체 47개 테스트와 모델·정규화·checkpoint 회귀는 통과했다. V5 결과와 안전 시험의 초기 corner 자기접촉, 세부 gradient·재현 명령은 [Standing V5 보고서](STANDING_V5.md)에 기록했다.

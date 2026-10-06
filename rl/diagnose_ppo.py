@@ -197,7 +197,7 @@ def instrument_update(alg, *, update_fn=None):
     original_log_prob = alg.actor.get_output_log_prob
     original_clip = torch.nn.utils.clip_grad_norm_
     current = [None]
-    batches, gradients = [], []
+    batches, gradients, head_gradients = [], [], []
     def generator(*args, **kwargs):
         for batch in original_generator(*args, **kwargs):
             current[0] = batch
@@ -205,15 +205,34 @@ def instrument_update(alg, *, update_fn=None):
     def log_prob(actions):
         value = original_log_prob(actions)
         b = current[0]
+        # MC entropy의 graph를 계측용 no_grad 안에서 만들지 않는다.
+        entropy = alg.actor.output_entropy
         with torch.no_grad():
             logratio = value-b.old_actions_log_prob.squeeze(-1)
             ratio = logratio.exp()
             analytic = alg.actor.get_kl_divergence(b.old_distribution_params, alg.actor.output_distribution_params)
             batches.append(dict(ratio=stats(ratio.cpu().numpy()), approximate_kl=float(((ratio-1)-logratio).mean()),
                 analytic_kl=float(analytic.mean()), clip_fraction=float(((ratio-1).abs()>alg.clip_param).float().mean()),
-                entropy=float(alg.actor.output_entropy.mean())))
+                entropy=float(entropy.mean()),
+                entropy_requires_grad=entropy.requires_grad,
+                latent_mean_square=float(alg.actor.output_distribution_params[0].square().mean()),
+                surrogate_loss=float(torch.maximum(-b.advantages.squeeze(-1)*ratio,
+                    -b.advantages.squeeze(-1)*ratio.clamp(1-alg.clip_param,1+alg.clip_param)).mean())))
         return value
     def clip(parameters, *args, **kwargs):
+        parameters = list(parameters)
+        if parameters and parameters[0] is next(alg.actor.parameters()):
+            head = alg.actor.mlp[-1]
+            distribution = alg.actor.distribution
+            std = getattr(distribution, 'std_param', getattr(distribution, 'log_std_param', None))
+            head_gradients.append(dict(
+                mean_bias_gradient=head.bias.grad.detach().cpu().tolist(),
+                mean_weight_gradient_norm=head.weight.grad.norm(dim=1).detach().cpu().tolist(),
+                std_parameter_gradient=std.grad.detach().cpu().tolist(),
+                log_std_coordinate_gradient=(std.detach()*std.grad).cpu().tolist()
+                    if distribution.std_type=='scalar' else std.grad.detach().cpu().tolist(),
+                std_parameterization=distribution.std_type,
+                mean_bias=head.bias.detach().cpu().tolist()))
         value = original_clip(parameters, *args, **kwargs)
         gradients.append(float(value))
         return value
@@ -227,6 +246,7 @@ def instrument_update(alg, *, update_fn=None):
         alg.actor.get_output_log_prob = original_log_prob
         torch.nn.utils.clip_grad_norm_ = original_clip
     return dict(loss=loss, minibatches=batches, actor_gradient_norm=gradients[::2],
+                head_gradients=head_gradients,
                 critic_gradient_norm=gradients[1::2], learning_rate=alg.learning_rate,
                 action_std=alg.actor.distribution.std_param.detach().cpu().tolist())
 

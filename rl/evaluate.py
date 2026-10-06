@@ -5,10 +5,11 @@ from pathlib import Path
 import math
 import torch
 from rsl_rl.runners import OnPolicyRunner
-from .config import StandingCfg, ppo_config
+from .config import StandingCfg, ppo_config, checkpoint_ppo_config
 from .env import StandingEnv
 from .normalization import restore
 from .action_mapping import equivalent_raw
+from .distributions import checkpoint_distribution
 
 
 class ScriptedController:
@@ -49,7 +50,11 @@ def evaluate(cfg, checkpoint=None, random=False, scripted=False, *, step_callbac
     try:
         policy = None
         if checkpoint is not None:
-            runner = OnPolicyRunner(env, ppo_config(), log_dir=None, device=cfg.device)
+            metadata = torch.load(checkpoint, weights_only=False, map_location='cpu').get('infos')
+            distribution = checkpoint_distribution(metadata)
+            if distribution=='squashed' and cfg.action_mapping!='identity':
+                raise ValueError('squashed checkpoint에는 identity environment mapping이 필요합니다.')
+            runner = OnPolicyRunner(env, checkpoint_ppo_config(metadata), log_dir=None, device=cfg.device)
             infos = runner.load(str(checkpoint), load_cfg={'actor': True, 'critic': True})
             restore(runner.alg, infos)
             policy = runner.get_inference_policy(device=cfg.device)

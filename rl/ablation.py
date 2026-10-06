@@ -48,24 +48,37 @@ def classify(candidate,parent,zero,version='v3'):
     bias=float(np.abs(candidate['actions']['applied']['mean']).mean()) if 'applied' in candidate['actions'] else None
     old_bias=float(np.abs(parent['actions']['applied']['mean']).mean()) if 'applied' in parent['actions'] else None
     bias_improvement=bias is not None and old_bias is not None and bias<old_bias-1e-4
+    if version=='v5':
+        distribution=candidate['policy_probe']['distribution']
+        bias=float(np.abs(distribution['latent_mean']['mean']).mean())
+        old_distribution=parent.get('policy_probe',{}).get('distribution')
+        old_mean=(old_distribution['latent_mean']['mean'] if old_distribution else parent['actions']['policy_raw']['mean'])
+        old_bias=float(np.abs(old_mean).mean())
+        bias_improvement=bias<old_bias-1e-4
+        boundary=candidate['actions']['policy_boundary_fraction']
+        old_boundary=parent['actions']['policy_boundary_fraction']
+        boundary_improvement=boundary<old_boundary-1e-4
     recovery=(metrics['push_recovery_rate'] or 0)>(old['push_recovery_rate'] or 0)+1e-6
     common_parent_return=candidate.get('common_parent_return',old['mean_return'])
     aligned=metrics['mean_return']>common_parent_return+1e-4 and peak_reduction>=.15 and integrated_reduction>=.15
     collapsed=correct_feedback(parent) and not correct_feedback(candidate)
     severe_boundary=boundary>.9 and boundary>old_boundary+.15
     input_ok=True
-    if version=='v4':
+    if version in ('v4','v5'):
         previous=candidate['policy_probe']['observations']['previous_action']
         input_ok=(max(previous['normalized']['max'])<=1.000001 and min(previous['normalized']['min'])>=-1.000001)
     success=success and input_ok
     partial=(safety and input_ok and peak_reduction>=.15 and integrated_reduction>=.15 and
-        (feedback or boundary_improvement or recovery or (bias_improvement if version=='v4' else aligned)) and not collapsed and not severe_boundary)
+        (feedback or boundary_improvement or recovery or (bias_improvement if version in ('v4','v5') else aligned)) and not collapsed and not severe_boundary)
     status='SUCCESS' if success else ('PARTIAL' if partial else 'FAIL')
     return dict(status=status,safe=safety,per_seed_zero_improved=seed_improved,
         peak_reduction=peak_reduction,integrated_reduction=integrated_reduction,
         feedback_improved=feedback,boundary_improved=boundary_improvement,recovery_improved=recovery,
         return_alignment_improved=aligned,feedback_collapsed=collapsed,severe_boundary=severe_boundary,
-        persistent_bias_improved=bias_improvement,mean_absolute_applied_bias=bias,semantic_input_ok=input_ok,
+        persistent_bias_improved=bias_improvement,
+        mean_absolute_applied_bias=(float(np.abs(candidate['actions']['applied']['mean']).mean())
+            if 'applied' in candidate['actions'] else None),
+        mean_absolute_latent_bias=bias if version=='v5' else None,semantic_input_ok=input_ok,
         thresholds=dict(partial_reduction=.15,saturation_fraction=.01,severe_boundary=.9))
 
 
@@ -84,7 +97,9 @@ def common_return(summary,scale):
 
 def measure(cfg,output,label,checkpoint=None):
     rows=[];traces=[]
-    actual_cfg=replace(cfg,action_basis='joint',standing_basis=None) if checkpoint is None else cfg
+    actual_cfg=(replace(cfg,action_basis='joint',standing_basis=None,
+        action_mapping='clip' if cfg.action_mapping=='identity' else cfg.action_mapping)
+        if checkpoint is None else cfg)
     for seed in SEEDS:
         recorder=ActionTrace()
         row=evaluate(replace(actual_cfg,num_envs=16,seed=seed,balanced_push_directions=True),checkpoint=checkpoint,
@@ -126,7 +141,7 @@ def evaluate_candidate(directory,output,name,checkpoints,parent_path=None,cfg=No
         if parent:
             reference=parent['checkpoints'].get(key,parent['best'])
             summary['common_parent_return']=common_return(reference,cfg.orientation_reward_scale)
-            summary['classification']=classify(summary,reference,result['baselines']['zero'],'v4' if name.startswith('v4') else 'v3')
+            summary['classification']=classify(summary,reference,result['baselines']['zero'],name[:2] if name.startswith(('v4','v5')) else 'v3')
         result['checkpoints'][key]=summary;save(path,result)
     trained=[(int(i),row) for i,row in result['checkpoints'].items() if int(i)>0 and safe(row)]
     successes=[(i,row) for i,row in trained if parent and row['classification']['status']=='SUCCESS']
@@ -145,9 +160,9 @@ def evaluate_candidate(directory,output,name,checkpoints,parent_path=None,cfg=No
     result.update(best_checkpoint=best_iteration if choices else None,best_eligible=bool(choices),
                   diagnostic_checkpoint=best_iteration,best=best,parent=str(parent_path) if parent_path else None)
     if parent:
-        reference=parent['checkpoints'].get(str(best_iteration),parent['best']) if name.startswith('v4') else parent['best']
+        reference=parent['checkpoints'].get(str(best_iteration),parent['best']) if name.startswith(('v4','v5')) else parent['best']
         best['common_parent_return']=common_return(reference,cfg.orientation_reward_scale)
-        decision=classify(best,reference,result['baselines']['zero'],'v4' if name.startswith('v4') else 'v3')
+        decision=classify(best,reference,result['baselines']['zero'],name[:2] if name.startswith(('v4','v5')) else 'v3')
         result['decision']=decision
         save(output/'decision.json',decision)
     save(path,result)

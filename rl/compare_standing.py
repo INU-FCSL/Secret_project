@@ -13,6 +13,7 @@ from .config import ppo_config
 from .action_mapping import bounded_action
 from .normalization import configure_model, checkpoint_mode
 from .action_diagnostics import mode_decomposition
+from .distributions import checkpoint_distribution, inverse_squash
 
 
 class ActionTrace:
@@ -22,7 +23,8 @@ class ActionTrace:
     def __call__(self,env,obs,action,reward,done,extras,alive,time):
         d=extras['diagnostics']
         error=torch.stack((d['roll'],d['pitch']),-1)-env.reference_standing_orientation[:2]
-        row=dict(requested=d.get('raw_joint_actions',action),policy_raw=action,
+        latent=inverse_squash(action) if env.cfg.action_mapping=='identity' else action
+        row=dict(requested=d.get('raw_joint_actions',action),policy_raw=action,policy_latent=latent,
             bounded=d['bounded_actions'],applied=d['applied_actions'],target=d['targets'],
             actual=extras['terminal_observation']['actor'][:,6:18]+env.default_joint_position,
             error=error.rad2deg(),omega=obs['actor'][:,3:5],raw=obs['actor'],
@@ -38,11 +40,11 @@ def action_summary(data,action_mapping='clip'):
     mask=data['valid']
     requested=data['requested'][mask]
     policy_raw=data.get('policy_raw',data['requested'])[mask]
-    policy_bounded=np.tanh(policy_raw) if action_mapping=='tanh' else policy_raw.clip(-1,1)
+    policy_bounded=np.tanh(policy_raw) if action_mapping=='tanh' else (policy_raw if action_mapping=='identity' else policy_raw.clip(-1,1))
     applied=data['applied'][mask]
     clipped=requested.clip(-1,1)
     bounded=data['bounded'][mask] if 'bounded' in data else (np.tanh(requested) if action_mapping=='tanh' else clipped)
-    gain=1-np.tanh(policy_raw)**2 if action_mapping=='tanh' else (np.abs(policy_raw)<1).astype(float)
+    gain=1-policy_bounded**2 if action_mapping in ('tanh','identity') else (np.abs(policy_raw)<1).astype(float)
     feedback={}
     for key in ('requested','bounded','applied'):
         if key=='bounded' and key not in data:
@@ -90,8 +92,8 @@ def aggregate(rows):
 @torch.no_grad()
 def policy_probe(checkpoint,data,action_mapping='clip'):
     """같은 관측에서 자세·각속도만 바꿔 국소 피드백 부호를 확인한다."""
-    actor_cfg=ppo_config()['actor']
     state=torch.load(checkpoint,weights_only=False,map_location='cuda')
+    actor_cfg=ppo_config(checkpoint_distribution(state.get('infos')))['actor']
     output_dim=state['actor_state_dict']['mlp.4.weight'].shape[0]
     raw=torch.tensor(data['raw'][data['valid']],device='cuda')
     observation=TensorDict({'actor':raw[:1]},batch_size=[1])
@@ -101,6 +103,14 @@ def policy_probe(checkpoint,data,action_mapping='clip'):
     configure_model(actor,checkpoint_mode(state.get('infos')))
     actor.eval()
     normalized=actor.obs_normalizer(raw)
+    latent_mean=actor.mlp(normalized)
+    actor.distribution.update(latent_mean)
+    distribution=dict(kind=checkpoint_distribution(state.get('infos')),
+        latent_mean=stats(latent_mean.cpu().numpy(),axis=0),
+        sigma=actor.output_std[0].cpu().tolist(),
+        mean_abs_latent=latent_mean.abs().mean(0).cpu().tolist(),
+        deterministic_90_fraction=(latent_mean.tanh().abs()>=.9).float().mean(0).cpu().tolist(),
+        entropy=float(actor.output_entropy.mean()))
     groups={'gravity':(0,3),'angular_velocity':(3,6),'joint_position':(6,18),
             'joint_velocity':(18,30),'previous_action':(30,42)}
     observations={name:dict(raw=stats(raw[:,a:b].cpu().numpy(),axis=0),
@@ -117,7 +127,7 @@ def policy_probe(checkpoint,data,action_mapping='clip'):
             outside_warmup_three_std=float((np.abs(previous-mean)>3*std).mean()))
     selected=torch.tensor(data['raw'][data['after']][::16],device='cuda')
     if len(selected)==0:
-        return dict(observations=observations,local_feedback=None)
+        return dict(distribution=distribution,observations=observations,local_feedback=None)
     gravity=selected[:,:3]
     rpy=torch.stack((torch.atan2(-gravity[:,1],-gravity[:,2]),torch.asin(gravity[:,0].clamp(-1,1))),-1)
     def differential(obs):
@@ -142,7 +152,7 @@ def policy_probe(checkpoint,data,action_mapping='clip'):
             outputs.append(differential(obs)[:,j])
         feedback[axis]=dict(position_per_degree=stats(pose.cpu().numpy()),
             velocity_per_rad_s=stats(((outputs[1]-outputs[0])/.02).cpu().numpy()))
-    return dict(observations=observations,local_feedback=feedback)
+    return dict(distribution=distribution,observations=observations,local_feedback=feedback)
 
 
 def gate_decision(results):

@@ -48,8 +48,8 @@ class StandingCfg:
             raise ValueError('standing basis의 측정된 행렬이 필요합니다.')
         if self.previous_action_normalization not in ('running','identity'):
             raise ValueError('previous action 정규화는 running 또는 identity여야 합니다.')
-        if self.action_mapping not in ('clip','tanh'):
-            raise ValueError('action mapping은 clip 또는 tanh여야 합니다.')
+        if self.action_mapping not in ('clip','tanh','identity'):
+            raise ValueError('action mapping은 clip, tanh 또는 identity여야 합니다.')
         if self.v2_stage is not None and self.v2_stage not in V2_DISTURBANCES:
             raise ValueError('V2 외란 단계는 A, B, C, D 중 하나여야 합니다.')
         if self.reference_standing_orientation is not None and (len(self.reference_standing_orientation) != 3 or not all(math.isfinite(v) for v in self.reference_standing_orientation)):
@@ -84,7 +84,7 @@ class StandingCfg:
         return self.timestep * self.decimation
 
 
-def ppo_config():
+def ppo_config(distribution='gaussian', mean_regularization=0.):
     from mjlab.rl.config import RslRlOnPolicyRunnerCfg, RslRlModelCfg, RslRlPpoAlgorithmCfg
     cfg = asdict(RslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(hidden_dims=(64, 64), obs_normalization=True,
@@ -99,4 +99,19 @@ def ppo_config():
     for model in ('actor', 'critic'):
         for key in ('cnn_cfg', 'rnn_type', 'rnn_hidden_dim', 'rnn_num_layers'):
             cfg[model].pop(key, None)
+    if distribution == 'squashed':
+        cfg['actor']['distribution_cfg']['class_name'] = 'rl.distributions:SquashedGaussianDistribution'
+    elif distribution != 'gaussian':
+        raise ValueError('policy distribution은 gaussian 또는 squashed여야 합니다.')
+    if mean_regularization:
+        if not math.isfinite(mean_regularization) or mean_regularization<0:
+            raise ValueError('mean regularization coefficient는 유한한 양수여야 합니다.')
+        cfg['algorithm'].update(class_name='rl.mean_regularization:MeanRegularizedPPO',
+            mean_regularization=mean_regularization)
     return cfg
+
+
+def checkpoint_ppo_config(infos):
+    """기존 checkpoint는 기본 Gaussian, V5는 distribution·penalty를 복원한다."""
+    infos=infos or {}
+    return ppo_config(infos.get('policy_distribution','gaussian'),infos.get('mean_regularization',0.))
